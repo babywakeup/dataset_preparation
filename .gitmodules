@@ -1,0 +1,3 @@
+[submodule "multithreshold"]
+	path = multithreshold
+	url = https://github.com/babywakeup/multithreshold

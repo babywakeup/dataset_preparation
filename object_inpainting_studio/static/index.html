@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Object Inpainting Dataset Studio</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <div><strong>Object Inpainting Dataset Studio</strong><span>Independent node canvas</span></div>
+      <div class="toolbar">
+        <button id="new-workflow">空白画布</button>
+        <button id="default-workflow">完整示例</button>
+        <button id="validate-workflow">Validate</button>
+        <button id="save-workflow">Download workflow</button>
+        <label class="button">Load workflow<input id="load-workflow" type="file" accept="application/json" hidden /></label>
+      </div>
+    </header>
+    <main>
+      <aside id="catalog" class="panel">
+        <h2>先从一个节点开始</h2>
+        <p>下面的练习只保留一个节点，不需要理解完整流程。切换练习会替换画布，已有修改请先下载保存。</p>
+        <div id="starter-nodes">
+          <button id="loop-example">↻ 逐张处理示例 · 从这里开始</button>
+          <button data-starter="LoadTargetNode">① 读取一张图片</button>
+          <button data-starter="BuildPromptNode">② 生成一段提示词</button>
+          <button data-starter="ExpandMaskNode">③ 扩展一张 Mask</button>
+          <button data-starter="SAM2MaskNode">④ SAM2 获取物体 Mask</button>
+          <button data-starter="SAM3TextMaskNode">⑤ SAM3 文本分割物体</button>
+          <button data-starter="MaskToRGBANode">⑥ Mask 转透明抠图</button>
+          <button data-starter="RGBAToWhiteBackgroundNode">⑦ RGBA 转白底参考图</button>
+          <button data-starter="FluxKleinReferenceNode">⑧ FLUX2 Klein 参考图生成</button>
+          <button data-starter="SaveImagesNode">⑨ 保存最多四张图片</button>
+          <button data-starter="FolderImagesNode">⑩ 读取服务器文件夹图片</button>
+          <button data-starter="AutoColorRegionsNode">⑪ Mask 内自动颜色分区</button>
+          <button data-starter="FluxRandomRecolorNode">⑫ FLUX2 衣服随机换色</button>
+        </div>
+        <details class="workflow-guide"><summary>完整流程在做什么？</summary><p>原图 + 物体 Mask → 检查物体 → 抠出参考图；Mask 向外扩展 → 原图对应区域涂灰；加上提示词 → 检查样本 → 导出训练数据。Mask 可以来自已有标注，也可用 SAM2 按物体框生成，或用 SAM3 按文本生成。完整示例默认仍读取已有 Mask，不运行图像生成模型。</p></details>
+        <h2>添加节点</h2><p>点击添加，拖动标题移动。点击输出圆点，再点同类型输入圆点来连接。</p>
+      </aside>
+      <section id="workspace-wrap">
+        <section id="loop-toolbar" aria-labelledby="loop-title">
+          <div class="loop-heading"><strong id="loop-title">↻ 文件夹逐张处理</strong><span id="loop-mode">单张调试</span></div>
+          <p id="loop-summary">添加文件夹节点，开启「↻ 逐张」，自动标出重复执行的路径。</p>
+          <div class="loop-controls">
+            <label>保存终点<select id="loop-target" aria-label="循环保存终点"></select></label>
+            <button id="loop-focus">定位流程</button>
+            <button id="loop-arrange">整理流程</button>
+            <button id="loop-check">重新检查</button>
+            <button id="loop-trial" disabled>试跑当前张 · 写入磁盘</button>
+            <button id="loop-run" disabled>运行全部 · 写入磁盘</button>
+          </div>
+          <small id="loop-steps-label">循环内节点 · 点击定位，分支关系以画布连线为准</small>
+          <ol id="loop-steps" aria-labelledby="loop-steps-label"></ol>
+          <p id="loop-message" role="status" aria-live="polite"></p>
+          <div class="loop-legend"><span>● 绿色：每张重复的路径</span><span>● 琥珀色：固定输入，不遍历</span><span>灰色：不执行</span></div>
+        </section>
+        <div id="workspace"><div id="loop-region" hidden><strong>↻ 每张图片执行一次</strong><span></span></div><svg id="connections"></svg><div id="nodes"></div></div>
+        <div id="connection-hint">Select an output port to begin a connection.</div>
+      </section>
+      <aside id="inspector" class="panel">
+        <h2>节点说明与输入</h2>
+        <div id="node-help"><p>点击节点的“说明与测试”查看用途和测试方法。</p></div>
+        <div id="node-fields"><p>Select a node to edit its input bindings.</p></div>
+        <h2>当前节点输出（自动识别图像 / 文本）</h2>
+        <div id="node-preview"><p>点击节点的“测试此节点”查看结果。只运行它和必要的上游，不执行保存操作。</p></div>
+        <section id="batch-panel" aria-labelledby="batch-title">
+          <h2 id="batch-title">↻ 逐张任务 · 执行记录</h2>
+          <p>① 在文件夹节点切换「↻ 逐张」 → ② 连到保存节点 → ③ 在画布顶部试跑或运行全部。绿色路径每张重复；琥珀色分支是固定输入，当前仍会在每轮读取。仅所选保存终点写入磁盘。</p>
+          <details><summary>路径、索引与执行规则</summary><p>dir 是服务器文件夹路径。recursive：0 不递归，1 递归；index 从 0 开始，试跑这一张，运行全部则从这一张到末尾。检查数量和试跑均排除输入下的输出子目录。保存目录不能是输入目录或其上级。循环上游只能包含一个文件夹节点和所选的一个保存节点；文件夹参数和保存目录须直接填写。提交后固定流程快照，编辑画布不改变已提交任务。</p></details>
+          <label class="batch-checkbox"><input id="batch-continue-on-error" type="checkbox" checked />单个文件出错后继续处理</label>
+          <div role="status" aria-live="polite">
+            <p id="batch-status">正在恢复最近任务…</p>
+            <p id="batch-counts">已处理 0 / 0</p>
+          </div>
+          <progress id="batch-progress" max="1" value="0" aria-label="批量文件处理进度"></progress>
+          <pre id="batch-current"></pre>
+          <p id="batch-error" role="alert"></p>
+          <div class="batch-actions">
+            <button id="batch-cancel" disabled>停止任务</button>
+            <button id="batch-refresh">刷新 / 重试</button>
+            <button id="batch-download" disabled>下载 JSON 报告</button>
+          </div>
+          <p>停止需等待当前节点返回，不会强制中断节点。任务仅保存在服务进程内：刷新页面会恢复最近任务，服务重启则丢失任务记录（已写入文件保留）。报告只记录源文件、输出路径或错误，不保存预览图片。</p>
+          <details><summary id="batch-results-label">文件结果</summary><ol id="batch-results"></ol></details>
+        </section>
+        <hr />
+        <h2>Sample preview</h2>
+        <label>Target image path<input id="target-path" type="text" placeholder="/absolute/path/to/target.png" /></label>
+        <label>Object mask path<input id="mask-path" type="text" placeholder="/absolute/path/to/mask.png" /></label>
+        <label>Object name<input id="object-name" type="text" value="object" /></label>
+        <div id="config-fields"></div>
+        <button id="preview">Run preview</button>
+        <div id="preview-grid"></div>
+        <label>Input JSONL path<input id="manifest-path" type="text" placeholder="/absolute/path/to/input.jsonl" /></label>
+        <label>Output dataset directory<input id="output-dir" type="text" placeholder="/absolute/path/to/output" /></label>
+        <label>Preview count<input id="preview-count" type="number" value="16" min="0" /></label>
+        <button id="export">Export JSONL dataset</button>
+        <pre id="status">Loading node catalog…</pre>
+      </aside>
+    </main>
+    <dialog id="image-dialog"><button id="close-image-dialog">关闭</button><img alt="节点输出大图" /></dialog>
+    <script src="/static/loop.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

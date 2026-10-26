@@ -1,0 +1,109 @@
+{
+  "nodes": {
+    "record": {
+      "class_type": "RecordInputNode",
+      "inputs": {"record": {"context": "record"}}
+    },
+    "target": {
+      "class_type": "LoadTargetNode",
+      "inputs": {"path": {"node": "record", "output": "target_path"}}
+    },
+    "mask": {
+      "class_type": "LoadInstanceMaskNode",
+      "inputs": {
+        "path": {"node": "record", "output": "mask_path"},
+        "target": {"node": "target", "output": "target"}
+      }
+    },
+    "selection": {
+      "class_type": "SelectObjectNode",
+      "inputs": {
+        "object_mask": {"node": "mask", "output": "object_mask"},
+        "config": {"context": "config"}
+      }
+    },
+    "reference": {
+      "class_type": "ExtractReferenceNode",
+      "inputs": {
+        "target": {"node": "target", "output": "target"},
+        "object_mask": {"node": "selection", "output": "object_mask"},
+        "bbox": {"node": "selection", "output": "bbox"},
+        "config": {"context": "config"}
+      }
+    },
+    "expand": {
+      "class_type": "ExpandMaskNode",
+      "inputs": {
+        "object_mask": {"node": "selection", "output": "object_mask"},
+        "config": {"context": "config"}
+      }
+    },
+    "align": {
+      "class_type": "AlignSquareNode",
+      "inputs": {
+        "target": {"node": "target", "output": "target"},
+        "object_mask": {"node": "selection", "output": "object_mask"},
+        "edit_mask": {"node": "expand", "output": "edit_mask"},
+        "config": {"context": "config"}
+      }
+    },
+    "source": {
+      "class_type": "GrayMaskNode",
+      "inputs": {
+        "target": {"node": "align", "output": "target"},
+        "edit_mask": {"node": "align", "output": "edit_mask"}
+      }
+    },
+    "prompt": {
+      "class_type": "BuildPromptNode",
+      "inputs": {"object_name": {"node": "record", "output": "object_name"}}
+    },
+    "assemble": {
+      "class_type": "AssembleSampleNode",
+      "inputs": {
+        "target": {"node": "align", "output": "target"},
+        "source": {"node": "source", "output": "source"},
+        "edit_mask": {"node": "align", "output": "edit_mask"},
+        "reference": {"node": "reference", "output": "reference"},
+        "prompt": {"node": "prompt", "output": "prompt"}
+      }
+    },
+    "validate": {
+      "class_type": "ValidateSampleNode",
+      "inputs": {
+        "sample": {"node": "assemble", "output": "sample"},
+        "object_mask": {"node": "align", "output": "object_mask"},
+        "config": {"context": "config"}
+      }
+    },
+    "save": {
+      "class_type": "SaveSampleNode",
+      "inputs": {
+        "sample": {"node": "validate", "output": "sample"},
+        "record": {"context": "record"},
+        "config": {"context": "config"},
+        "output": {"context": "output"}
+      }
+    },
+    "jsonl": {
+      "class_type": "WriteJsonlNode",
+      "inputs": {
+        "entry": {"node": "save", "output": "entry"},
+        "path": {"node": "save", "output": "manifest_path"}
+      }
+    },
+    "preview": {
+      "class_type": "SavePreviewNode",
+      "inputs": {
+        "sample": {"node": "validate", "output": "sample"},
+        "path": {"context": "preview_path"}
+      }
+    }
+  },
+  "outputs": {
+    "sample": {"node": "validate", "output": "sample"},
+    "entry": {"node": "jsonl", "output": "entry"},
+    "split": {"node": "save", "output": "split"},
+    "preview": {"node": "preview", "output": "path"}
+  }
+}

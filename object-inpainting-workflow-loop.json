@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "workflow": {
+    "nodes": {
+      "folder": {
+        "class_type": "FolderImagesNode",
+        "inputs": {
+          "dir": "",
+          "recursive": 0,
+          "index": 0
+        }
+      },
+      "loadtarget": {
+        "class_type": "LoadTargetNode",
+        "inputs": {
+          "path": {
+            "node": "folder",
+            "output": "path"
+          }
+        }
+      },
+      "sam3textmask": {
+        "class_type": "SAM3TextMaskNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "text": "cloth"
+        }
+      },
+      "masktorgba": {
+        "class_type": "MaskToRGBANode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          }
+        }
+      },
+      "rgbatowhitebackground": {
+        "class_type": "RGBAToWhiteBackgroundNode",
+        "inputs": {
+          "rgba": {
+            "node": "masktorgba",
+            "output": "rgba"
+          }
+        }
+      },
+      "fluxkleinreference": {
+        "class_type": "FluxKleinReferenceNode",
+        "inputs": {
+          "prompt": "Create a clean e-commerce flat-lay product photograph of the exact garment shown in reference image 2. Use reference image 1 only to recover visible garment details.  Show only this single garment laid flat on a pure white surface, photographed directly from above. Arrange it neatly in a natural, relaxed shape, with the front side facing upward. Show the entire garment, centered in the frame with even white margins. Lay sleeves and other garment parts naturally without overlapping or hiding important details.  Preserve the garment's original color, fabric texture, pattern, proportions, neckline, seams, buttons, pockets, and visible logos or text. Do not redesign the garment.  No person, body parts, mannequin, hanger, accessories, or other garments. No standing or floating presentation. Use soft, even studio lighting with subtle natural contact shadows. No added text, props, borders, or watermarks.",
+          "reference_1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "reference_2": {
+            "node": "rgbatowhitebackground",
+            "output": "rgb"
+          },
+          "reference_3": null,
+          "width": 1024,
+          "height": 1024,
+          "num_inference_steps": 8,
+          "guidance_scale": 4,
+          "seed": 0
+        }
+      },
+      "graymask": {
+        "class_type": "GrayMaskNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "edit_mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          }
+        }
+      },
+      "save": {
+        "class_type": "SaveImagesNode",
+        "inputs": {
+          "img1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "img2": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "img3": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "img4": {
+            "node": "fluxkleinreference",
+            "output": "image"
+          },
+          "dir": ""
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "layout": {
+    "folder": { "x": 50, "y": 60 },
+    "loadtarget": { "x": 410, "y": 60 },
+    "sam3textmask": { "x": 770, "y": 60 },
+    "masktorgba": { "x": 1130, "y": 60 },
+    "rgbatowhitebackground": { "x": 1490, "y": 60 },
+    "fluxkleinreference": { "x": 1850, "y": 60 },
+    "graymask": { "x": 1130, "y": 650 },
+    "save": { "x": 2210, "y": 60 }
+  },
+  "config": {
+    "resolution": 1024,
+    "reference_resolution": 512,
+    "dilation_radius": 4,
+    "reference_padding": 0.1,
+    "min_object_fraction": 0.01,
+    "max_object_fraction": 0.6,
+    "validation_fraction": 0.1,
+    "seed": 42
+  },
+  "loop": {
+    "sourceId": "folder",
+    "targetId": "save",
+    "enabled": true
+  }
+}

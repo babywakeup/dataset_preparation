@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "workflow": {
+    "nodes": {
+      "loadtarget": {
+        "class_type": "LoadTargetNode",
+        "inputs": {
+          "path": "/tmp/object-inpainting-studio-uploads-4onep51r/458f63648785431cae692b42a2de0e82.png"
+        }
+      },
+      "sam3textmask": {
+        "class_type": "SAM3TextMaskNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "text": "cloth"
+        }
+      },
+      "masktorgba": {
+        "class_type": "MaskToRGBANode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          }
+        }
+      },
+      "rgbatowhitebackground": {
+        "class_type": "RGBAToWhiteBackgroundNode",
+        "inputs": {
+          "rgba": {
+            "node": "masktorgba",
+            "output": "rgba"
+          }
+        }
+      },
+      "fluxkleinreference": {
+        "class_type": "FluxKleinReferenceNode",
+        "inputs": {
+          "prompt": "Create a clean e-commerce flat-lay product photograph of the exact garment shown in reference image 2. Use reference image 1 only to recover visible garment details.  Show only this single garment laid flat on a pure white surface, photographed directly from above. Arrange it neatly in a natural, relaxed shape, with the front side facing upward. Show the entire garment, centered in the frame with even white margins. Lay sleeves and other garment parts naturally without overlapping or hiding important details.  Preserve the garment's original color, fabric texture, pattern, proportions, neckline, seams, buttons, pockets, and visible logos or text. Do not redesign the garment.  No person, body parts, mannequin, hanger, accessories, or other garments. No standing or floating presentation. Use soft, even studio lighting with subtle natural contact shadows. No added text, props, borders, or watermarks.",
+          "reference_1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "reference_2": {
+            "node": "rgbatowhitebackground",
+            "output": "rgb"
+          },
+          "reference_3": null,
+          "width": 1024,
+          "height": 1024,
+          "num_inference_steps": 8,
+          "guidance_scale": 4,
+          "seed": 0
+        }
+      },
+      "graymask": {
+        "class_type": "GrayMaskNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "edit_mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          }
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "layout": {
+    "loadtarget": {
+      "x": 155,
+      "y": 135
+    },
+    "sam3textmask": {
+      "x": 550.0000610351562,
+      "y": 44.44445037841797
+    },
+    "masktorgba": {
+      "x": 871.666748046875,
+      "y": 52.77778625488281
+    },
+    "rgbatowhitebackground": {
+      "x": 1200.0001831054688,
+      "y": 102.22219848632812
+    },
+    "fluxkleinreference": {
+      "x": 1563.3333740234375,
+      "y": 12.444473266601562
+    },
+    "graymask": {
+      "x": 902,
+      "y": 679.5
+    }
+  },
+  "config": {
+    "resolution": 1024,
+    "reference_resolution": 512,
+    "dilation_radius": 4,
+    "reference_padding": 0.1,
+    "min_object_fraction": 0.01,
+    "max_object_fraction": 0.6,
+    "validation_fraction": 0.1,
+    "seed": 42
+  }
+}
