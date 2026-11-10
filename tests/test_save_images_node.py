@@ -65,7 +65,7 @@ class SaveImagesTests(unittest.TestCase):
             self.assertNotIn("img1", graph.nodes["save"]["inputs"])
             first = graph.run({"image": Image.new("RGBA", (2, 3))})["paths"]
             self.assertEqual(set(first), {"img3"})
-            self.assertEqual(Path(first["img3"]).relative_to(directory).as_posix(), "目标图/sample.png")
+            self.assertEqual(Path(first["img3"]).resolve().relative_to(Path(directory).resolve()).as_posix(), "目标图/sample.png")
             normalized = deepcopy(graph.definition)
             normalized["nodes"]["save"]["save_items"][0]["name"] = "新名称"
             second = NodeGraph(normalized).run({"image": Image.new("RGBA", (2, 3))})["paths"]
@@ -200,7 +200,7 @@ class SaveImagesTests(unittest.TestCase):
             self.assertEqual(len({Path(path).name for path in paths.values()}), 1)
             for name, source in images.items():
                 path = Path(paths[name])
-                self.assertEqual(path.parent, Path(directory) / name)
+                self.assertEqual(path.parent.resolve(), (Path(directory) / name).resolve())
                 with Image.open(path) as saved:
                     self.assertEqual(
                         (saved.mode, saved.size, saved.tobytes()), (source.mode, source.size, source.tobytes())

@@ -15,7 +15,7 @@ from PIL import Image
 
 class NodeContractTests(unittest.TestCase):
     def test_all_registered_nodes_have_input_and_output_classes(self):
-        self.assertEqual(len(NODE_CLASS_MAPPINGS), 28)
+        self.assertEqual(len(NODE_CLASS_MAPPINGS), 30)
         for name, node in NODE_CLASS_MAPPINGS.items():
             with self.subTest(node=name):
                 self.assertTrue(is_typeddict(node.INPUT_SCHEMA))

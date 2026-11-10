@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import tempfile
 import unittest
@@ -93,7 +95,29 @@ class FolderBatchTests(unittest.TestCase):
                     self.assertEqual(image.getpixel((0, 0)), color)
         self.assertNotEqual(job["results"][0]["paths"], job["results"][1]["paths"])
         self.assertEqual(self.client.get("/api/batch/latest").json()["job"], job)
-        self.assertNotIn("data:image", json.dumps(job))
+        self.assertTrue(job["visualize"])
+        self.assertEqual(set(job["loop_previews"]), {"batch"})
+        snapshot = job["loop_previews"]["batch"]
+        self.assertEqual((snapshot["loop_id"], snapshot["iteration"], snapshot["accepted"]), ("batch", 2, True))
+        self.assertEqual(job["results"][0]["preview"], {})
+        latest = job["results"][-1]
+        self.assertEqual(snapshot["outputs"], latest["preview"])
+        self.assertEqual(set(latest["preview"]), {"save"})
+        self.assertEqual(set(latest["preview"]["save"]), {"paths"})
+        previews = latest["preview"]["save"]["paths"]
+        self.assertEqual(previews["kind"], "object")
+        self.assertEqual(set(previews["items"]), {"img1", "img3"})
+        for port, preview in previews["items"].items():
+            self.assertEqual(preview["path"], latest["paths"][port])
+            self.assertEqual((preview["kind"], preview["mode"], preview["size"]), ("image", "RGB", [32, 24]))
+            self.assertTrue(preview["image"].startswith("data:image/png;base64,"))
+            with Image.open(io.BytesIO(base64.b64decode(preview["image"].split(",", 1)[1]))) as image:
+                self.assertEqual(image.getpixel((0, 0)), (0, 0, 255))
+        # Image data belongs only to the current input's two latest-preview locations.
+        without_previews = {**job, "loop_previews": {}, "results": [
+            {key: value for key, value in item.items() if key != "preview"} for item in job["results"]
+        ]}
+        self.assertNotIn("data:image", json.dumps(without_previews))
 
     def test_dynamic_named_items_use_each_source_filename_and_reject_rerun_conflicts(self):
         self.image("a.jpg", "red")
@@ -123,7 +147,7 @@ class FolderBatchTests(unittest.TestCase):
         plan = response.json()
         self.assertEqual((plan["source_id"], plan["target_id"], plan["total"]), ("folder", "save", 2))
         self.assertEqual(plan["executed_nodes"], ["folder", "save"])
-        self.assertEqual(plan["current_path"], str(self.input / "a.png"))
+        self.assertTrue(Path(plan["current_path"]).samefile(self.input / "a.png"))
         self.assertFalse(self.output.exists())
         self.assertIsNone(self.manager.latest())
 
@@ -136,7 +160,8 @@ class FolderBatchTests(unittest.TestCase):
         workflow["nodes"]["folder"]["inputs"].update(recursive=1, index=1)
         payload = {"workflow": workflow, "node_id": "save"}
         plan = self.client.post("/api/batch/plan", json=payload).json()
-        self.assertEqual((plan["total"], plan["current_path"]), (1, str(self.input / "c.png")))
+        self.assertEqual(plan["total"], 1)
+        self.assertTrue(Path(plan["current_path"]).samefile(self.input / "c.png"))
         response = self.client.post("/api/batch/preview", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["executed_nodes"], ["folder", "save"])
@@ -288,6 +313,46 @@ class FolderBatchTests(unittest.TestCase):
         final = self.manager.get(job["id"])
         self.assertEqual((final["status"], final["processed"]), ("cancelled", 0))
         self.assertFalse(self.output.exists())
+
+
+    def test_real_demo_folder_loops_preserve_each_source_and_reset_seed(self):
+        originals = {"a.png": (15, 35, 255), "b.png": (70, 90, 10)}
+        for name, color in originals.items():
+            Image.new("RGB", (80, 60), color).save(self.input / name)
+        workflow = self.workflow()
+        workflow["nodes"].update({
+            "demo": {"class_type": "LoopDemoImageNode", "inputs": {
+                "image": {"node": "folder", "output": "image"}, "seed": 0}},
+            "score": {"class_type": "LoopDemoScoreNode", "inputs": {
+                "image": {"node": "demo", "output": "image"}}},
+        })
+        workflow["nodes"]["save"]["inputs"].update({
+            "img1": {"node": "demo", "output": "image"},
+            "filename": {"node": "folder", "output": "filename"},
+        })
+        del workflow["nodes"]["save"]["inputs"]["img3"]
+        workflow["conditional_loop"] = {"loops": [{
+            "id": "demo", "start_nodes": ["demo"], "end_nodes": ["score"],
+            "seed_nodes": ["demo"], "max_iterations": 3,
+            "conditions": [{"node": "score", "output": "score", "operator": ">=", "value": 255}],
+        }]}
+        with patch("object_inpainting.nodes.loop_demo.time.sleep") as delay:
+            result = self.start(workflow)
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual((result["processed"], result["succeeded"]), (2, 2))
+        self.assertEqual(delay.call_count, 6)
+        for entry, (name, color) in zip(result["results"], originals.items()):
+            self.assertEqual([row["seeds"]["demo"] for row in entry["history"]], [0, 1, 2])
+            self.assertEqual([row["scores"][0]["value"] for row in entry["history"]], [0, 0, 255])
+            saved = Path(entry["paths"]["img1"])
+            self.assertEqual(saved.name, name)
+            with Image.open(saved) as image:
+                self.assertEqual(image.size, (80, 60))
+                self.assertEqual(image.getpixel((0, 0)), (0, 0, 255))
+                self.assertEqual(image.getpixel((79, 59)), color)
+            with Image.open(self.input / name) as image:
+                self.assertEqual(image.getpixel((0, 0)), color)
+        self.assertEqual(len(list(self.output.rglob("*.png"))), 2)
 
 
 if __name__ == "__main__":

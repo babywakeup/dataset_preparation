@@ -1,5 +1,5 @@
 // Required production controller, loaded between loop.js and app.js.
-const multipleUI = { nextId: 0, activeId: null };
+const multipleUI = { nextId: 0, activeId: null, previews: new Map() };
 const multipleColors = ["#a996ff", "#62d4bd", "#f4b76a", "#79baff", "#ef91bd", "#c2d875"];
 const isMultipleLoops = () => Object.hasOwn(state.workflow?.conditional_loop || {}, "loops");
 const multipleLoops = () => Array.isArray(state.workflow?.conditional_loop?.loops) ? state.workflow.conditional_loop.loops : [];
@@ -13,6 +13,7 @@ const multipleColor = id => {
 
 function resetMultipleLoops() {
   multipleUI.activeId = null;
+  multipleUI.previews.clear();
   normalizeImportedConditional();
   multipleLoops().forEach(item => {
     const number = /^loop_(\d+)$/.exec(item?.id)?.[1];
@@ -73,14 +74,31 @@ function multipleBody(config) {
 }
 
 // Read-only early feedback. The server plan is authoritative (including DAG ordering).
-function validateMultiple(targetId = conditionalUI.targetId) {
+function validateMultiple(targetId = conditionalUI.targetId, previewLoopId = null) {
   const config = state.workflow.conditional_loop;
   if (!config || typeof config !== "object" || Array.isArray(config)) return "conditional_loop 必须是配置对象；请明确删除无效配置后重新添加。";
   if (Object.keys(config).some(key => key !== "loops")) return "conditional_loop 不能混合 flat 字段和 loops。";
   if (!Array.isArray(config.loops) || config.loops.length < 1 || config.loops.length > 32) return "请配置 1–32 个循环。";
   const nodes = state.workflow.nodes;
+  let items = config.loops;
+  if (previewLoopId !== null) {
+    if (!multipleLoop(previewLoopId)) return "循环不存在。";
+    const required = new Set([previewLoopId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const needed = new Set(items.filter(item => required.has(item?.id)).flatMap(item =>
+        [...multipleValues(item, "end_nodes"), ...multipleValues(item, "conditions").map(c => c?.node)].flatMap(upstreamNodes)));
+      items.forEach(item => {
+        if (!required.has(item?.id) && multipleValues(item, "start_nodes").some(n => needed.has(n))) {
+          required.add(item.id); changed = true;
+        }
+      });
+    }
+    items = items.filter(item => required.has(item?.id));
+  }
   const ids = new Set(), occupied = new Set(), regions = [];
-  for (const item of config.loops) {
+  for (const item of items) {
     if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id.trim() || ids.has(item.id)) return "循环 ID 必须非空且唯一。";
     ids.add(item.id);
     const error = message => `${item.name || item.id}：${message}`;
@@ -105,7 +123,7 @@ function validateMultiple(targetId = conditionalUI.targetId) {
         if (typeof c.value !== "boolean" || !["==", "!="].includes(c.operator)) return error("布尔条件仅支持 == / !=，比较值必须是 true / false。");
       } else if (typeof c.value !== "number" || !Number.isFinite(c.value)) return error("数字条件阈值必须是有限数字。");
     }
-    if (nodes[targetId]?.class_type !== "SaveImagesNode") return "请选择公用 SaveImages 保存目标；失效目标不会自动替换。";
+    if (previewLoopId === null && nodes[targetId]?.class_type !== "SaveImagesNode") return "请选择公用 SaveImages 保存目标；失效目标不会自动替换。";
     const body = multipleBody(item);
     if (item.start_nodes.some(s => !item.end_nodes.some(e => upstreamNodes(e).includes(s)))) return error("每个起点必须能到达至少一个终点。");
     if ([...item.end_nodes, ...item.conditions.map(c => c.node)].some(id => !body.has(id))) return error("终点和条件必须来自本轮循环体。");
@@ -114,17 +132,12 @@ function validateMultiple(targetId = conditionalUI.targetId) {
     for (const id of item.seed_nodes) {
       if (!body.has(id) || nodeInfo(id).inputs.seed !== "INT" || !Number.isSafeInteger(nodes[id].inputs.seed) || nodes[id].inputs.seed < 0) return error(`种子 ${id} 须在循环体内并直接填写非负 INT seed；-1 保持随机，不加入递增种子。`);
     }
-    const ends = new Set(item.end_nodes), exits = new Set([...ends, ...item.conditions.map(c => c.node)]);
-    for (const [id, spec] of Object.entries(nodes)) {
-      if (body.has(id)) continue;
-      const allowed = id === targetId ? body : exits;
-      if (Object.values(spec.inputs || {}).some(v => isLink(v) && body.has(v.node) && !allowed.has(v.node))) return error(`循环中间输出被 ${id} 消费；请在高级设置中将来源显式加入 end_nodes。`);
-    }
-    if (Object.values(state.workflow.outputs || {}).some(v => isLink(v) && body.has(v.node))) return error("循环体输出不能直接暴露为工作流输出，请通过保存目标。");
+    const exits = new Set([...item.end_nodes, ...item.conditions.map(c => c.node)]);
+    if (Object.values(state.workflow.outputs || {}).some(v => isLink(v) && body.has(v.node) && (previewLoopId === null || !exits.has(v.node)))) return error("循环体输出不能直接暴露为工作流输出，请通过保存目标。");
     body.forEach(id => occupied.add(id)); regions.push({ item, body });
   }
   const saveAncestors = new Set(upstreamNodes(targetId));
-  if (regions.some(r => ![...r.body].some(id => saveAncestors.has(id)))) return "每个循环必须通过数据路径关联最终保存目标。";
+  if (previewLoopId === null && regions.some(r => ![...r.body].some(id => saveAncestors.has(id)))) return "每个循环必须通过数据路径关联最终保存目标。";
   const pending = new Set(regions);
   while (pending.size) {
     const ready = [...pending].find(r => ![...pending].some(other => other !== r && [...r.body].some(id => upstreamNodes(id).some(n => other.body.has(n)))));
@@ -165,12 +178,38 @@ function addMultipleLoop() {
   multipleLoops().push({ id, name: `循环 ${multipleUI.nextId}`, start_nodes: [], end_nodes: [], seed_nodes: [], conditions: [], mode: "all", max_iterations: 10, timeout_seconds: 0, on_exhausted: "fail" });
   multipleUI.activeId = id;
   document.querySelector("#conditional-panel").open = true;
-  beginMultiplePick(id, "start_nodes", null, true);
+  beginMultiplePick(id, "start_nodes", true);
   multipleChanged();
+}
+
+function addLoopDemo() {
+  if (nodeDeletionDisabled() || !state.workflow) return;
+  normalizeImportedConditional();
+  if ((conditionalEnabled() && !isMultipleLoops()) || (isMultipleLoops() && (!Array.isArray(state.workflow.conditional_loop.loops) || multipleLoops().length > 30))) {
+    setStatus("请先修正循环配置，并为两个示例循环保留名额。", true); return;
+  }
+  if (!isMultipleLoops()) state.workflow.conditional_loop = { loops: [] };
+  const top = Math.max(0, ...Object.values(state.layout).map(p => p.y + 400));
+  for (let index = 0; index < 2; index++) {
+    const id = nextMultipleId();
+    let image = `${id}_image`, score = `${id}_score`;
+    while (state.workflow.nodes[image] || state.workflow.nodes[score]) { image += "_demo"; score += "_demo"; }
+    state.workflow.nodes[image] = { class_type: "LoopDemoImageNode", inputs: { seed: index } };
+    state.workflow.nodes[score] = { class_type: "LoopDemoScoreNode", inputs: { image: link(image, "image") } };
+    state.layout[image] = { x: 50 + index * 760, y: top };
+    state.layout[score] = { x: 410 + index * 760, y: top };
+    multipleLoops().push({ id, name: `无模型示例 ${index + 1}`, start_nodes: [image], end_nodes: [score], seed_nodes: [image],
+      conditions: [{ node: score, output: "score", operator: ">=", value: 255 }], mode: "all", max_iterations: 3, timeout_seconds: 0, on_exhausted: "fail" });
+  }
+  conditionalUI.picking = null;
+  document.querySelector("#conditional-panel").open = true;
+  multipleChanged();
+  setStatus("已追加两个独立的 CPU 示例，不替换原流程。分别点击「预览此循环」，可看到红→绿→蓝（3 次）和绿→蓝（2 次），评分达到 255 时停止。将条件比较值改为 256 可验证未达标；无需模型、图片或保存目录，不写盘。");
 }
 
 function deleteMultipleLoop(id) {
   if (nodeDeletionDisabled() || !multipleLoop(id)) return;
+  multipleUI.previews.delete(id);
   if (conditionalUI.picking?.loopId === id) conditionalUI.picking = null;
   state.workflow.conditional_loop.loops = multipleLoops().filter(item => item.id !== id);
   if (multipleUI.activeId === id) multipleUI.activeId = null;
@@ -178,20 +217,19 @@ function deleteMultipleLoop(id) {
   multipleChanged();
 }
 
-function beginMultiplePick(loopId, kind, index = null, wizard = false, many = false) {
-  if (nodeDeletionDisabled() || !isMultipleLoops() || (loopId !== "$target" && !multipleLoop(loopId))) return;
+function beginMultiplePick(loopId, kind, wizard = false) {
+  if (nodeDeletionDisabled() || !isMultipleLoops() || !multipleLoop(loopId) || !["start_nodes", "end_nodes", "condition"].includes(kind)) return;
   multipleUI.activeId = loopId;
-  conditionalUI.picking = { loopId, kind, index, wizard, many };
+  conditionalUI.picking = { loopId, kind, wizard };
   state.connecting = null;
   render();
 }
 
 function multiplePickHint(pick = conditionalUI.picking) {
   if (!pick) return "点击卡片按钮可重新选择具体实例；Esc 退出点选。";
-  if (pick.kind === "target") return "选择公用保存目标：点击具体 SaveImages 节点标题。Esc 取消。";
   const name = multipleLoop(pick.loopId)?.name || pick.loopId;
-  const role = { start_nodes: "① 起点", end_nodes: "② 终点", seed_nodes: "递增种子", condition: "③ 条件" }[pick.kind];
-  return `${name} · ${role}：点击具体节点标题${pick.kind === "condition" ? "；单个数字 / 布尔输出直接选中，多个时点击具体输出圆点" : "（不拖动）"}。${pick.many ? "可连续增删；完成后按 Esc。" : "Esc 取消。"}`;
+  const role = { start_nodes: "① 起点", end_nodes: "② 终点", condition: "③ 条件" }[pick.kind];
+  return `${name} · ${role}：点击具体节点标题${pick.kind === "condition" ? "；单个数字 / 布尔输出直接选中，多个时点击具体输出圆点；重选将用一个条件替换原列表" : "（不拖动）"}。Esc 取消。`;
 }
 
 function consumeMultiplePick(id, output = null) {
@@ -201,14 +239,9 @@ function consumeMultiplePick(id, output = null) {
     conditionalUI.picking = null; state.connecting = null; return true;
   }
   const spec = state.workflow.nodes[id], item = multipleLoop(pick.loopId);
-  if (!spec || (pick.kind !== "target" && !item)) { conditionalUI.picking = null; return true; }
+  if (!spec || !item || !["start_nodes", "end_nodes", "condition"].includes(pick.kind)) { conditionalUI.picking = null; return true; }
   const reject = message => { setStatus(message, true); return true; };
-  if (pick.kind === "target") {
-    if (output != null || spec.class_type !== "SaveImagesNode") return reject("请点击具体 SaveImages 保存节点的标题。");
-    conditionalUI.targetId = id;
-    if (loopUI.enabled) loopUI.targetId = id;
-    conditionalUI.picking = null;
-  } else if (pick.kind === "condition") {
+  if (pick.kind === "condition") {
     const ports = Object.entries(nodeInfo(id).outputs).filter(([, type]) => conditionalScalarTypes.includes(type));
     if (output == null) {
       if (ports.length !== 1) return reject(ports.length ? "此节点有多个数字 / 布尔输出，请点击具体输出圆点。" : "图片 / 文本不能作为条件，请选择数字 / 布尔输出。");
@@ -216,25 +249,22 @@ function consumeMultiplePick(id, output = null) {
     }
     const type = nodeInfo(id).outputs[output];
     if (!conditionalScalarTypes.includes(type)) return reject("图片 / 文本不能作为条件，请选择数字 / 布尔输出圆点。");
-    if (!Array.isArray(item.conditions)) item.conditions = [];
-    const index = pick.index ?? item.conditions.length;
-    const previous = item.conditions[index];
+    const previous = Array.isArray(item.conditions) && item.conditions.length === 1 ? item.conditions[0] : null;
     const boolean = ["BOOL", "BOOLEAN"].includes(type);
     const sameKind = previous && typeof previous.value === (boolean ? "boolean" : "number");
-    item.conditions[index] = { node: id, output, operator: sameKind ? previous.operator : boolean ? "==" : "<=", value: sameKind ? previous.value : boolean ? true : 10 };
+    item.conditions = [{ node: id, output, operator: sameKind ? previous.operator : boolean ? "==" : "<=", value: sameKind ? previous.value : boolean ? true : 10 }];
     conditionalUI.picking = null;
   } else {
     if (output != null) return reject("请点击节点标题，不是输出端口。");
     if (["SaveImagesNode", "FolderImagesNode"].includes(spec.class_type) || nodeInfo(id).side_effects) return reject("起点 / 终点必须是普通计算节点，不是保存或文件夹节点。");
-    if (pick.kind === "seed_nodes" && (nodeInfo(id).inputs.seed !== "INT" || !Number.isSafeInteger(spec.inputs.seed) || spec.inputs.seed < 0)) return reject("递增种子须直接填写非负 INT seed；-1 保持随机，无需选择种子。");
     const previous = multipleValues(item, pick.kind);
-    item[pick.kind] = pick.many ? previous.includes(id) ? previous.filter(n => n !== id) : [...previous, id] : [id];
+    item[pick.kind] = [id];
     if (pick.kind === "start_nodes") {
       item.seed_nodes = multipleValues(item, "seed_nodes");
-      if (!pick.many) item.seed_nodes = item.seed_nodes.filter(n => !previous.includes(n));
+      item.seed_nodes = item.seed_nodes.filter(n => !previous.includes(n));
       if (item.start_nodes.includes(id) && nodeInfo(id).inputs.seed === "INT" && Number.isSafeInteger(spec.inputs.seed) && spec.inputs.seed >= 0 && !item.seed_nodes.includes(id)) item.seed_nodes.push(id);
     }
-    conditionalUI.picking = pick.many ? pick : pick.wizard ? { ...pick, kind: pick.kind === "start_nodes" ? "end_nodes" : "condition", index: 0 } : null;
+    conditionalUI.picking = pick.wizard ? { ...pick, kind: pick.kind === "start_nodes" ? "end_nodes" : "condition" } : null;
   }
   state.selected = id;
   if (!conditionalUI.picking) document.querySelector("#connection-hint").textContent = "已指定节点实例；点击输出端口可开始连线。";
@@ -259,6 +289,7 @@ function renderMultipleEntry() {
   const busy = nodeDeletionDisabled();
   const add = document.querySelector("#conditional-add");
   add.disabled = busy; // Remains visible even when the details panel is collapsed.
+  document.querySelector("#conditional-demo").disabled = busy;
   const root = document.querySelector("#multiple-loops");
   root.hidden = false;
   if (!conditionalEnabled()) {
@@ -278,19 +309,6 @@ function renderMultiFields() {
   const hint = Object.assign(document.createElement("p"), { className: "multiple-hint", textContent: multiplePickHint() });
   root.append(hint);
   if (conditionalUI.picking) multipleButton("取消点选 (Esc)", cancelConditionalPick, root);
-  const target = Object.assign(document.createElement("section"), { className: "multiple-target" });
-  target.append(Object.assign(document.createElement("strong"), { textContent: "最终保存目标 · 全部循环通过后仅保存一次" }));
-  const saves = Object.entries(state.workflow.nodes).filter(([, spec]) => spec.class_type === "SaveImagesNode");
-  const select = conditionalSelect([["", "请选择公用保存目标…"], ...saves.map(([id]) => [id, conditionalNodeCaption(id)])], conditionalUI.targetId, "公用最终保存目标");
-  select.onchange = () => {
-    if (nodeDeletionDisabled()) return;
-    conditionalUI.targetId = select.value || null;
-    if (loopUI.enabled) loopUI.targetId = conditionalUI.targetId;
-    conditionalUI.picking = null; multipleChanged();
-  };
-  target.append(select);
-  multipleButton("画布选择最终保存目标", () => beginMultiplePick("$target", "target"), target);
-  root.append(target);
   multipleLoops().forEach((item, index) => {
     if (!item || typeof item !== "object") return;
     const id = item.id;
@@ -298,9 +316,11 @@ function renderMultiFields() {
     card.dataset.loopId = id;
     card.style.setProperty("--conditional-color", multipleColor(id));
     card.append(Object.assign(document.createElement("strong"), { textContent: `↻ ${index + 1} · ${item.name || id}` }));
-    const name = Object.assign(document.createElement("input"), { value: item.name ?? id });
-    name.onchange = () => editMultiple(id, loop => { loop.name = name.value; });
-    multipleField(card, "循环名称", name);
+    const preview = multipleButton("预览此循环 · 不写盘", () => batchRequest("preview-loop", id), card);
+    preview.dataset.previewLoopId = id;
+    const output = Object.assign(document.createElement("div"), { className: "multiple-preview" });
+    output.dataset.previewLoopId = id;
+    card.append(output);
     multipleButton("删除循环", () => deleteMultipleLoop(id), card);
     for (const [field, title] of [["start_nodes", "起点"], ["end_nodes", "终点"]]) {
       const row = Object.assign(document.createElement("div"), { className: "multiple-role-row" });
@@ -308,9 +328,14 @@ function renderMultiFields() {
       (Array.isArray(item[field]) ? item[field] : []).forEach(node => multipleButton(`${title} · ${conditionalNodeCaption(node)}`, () => { if (state.workflow.nodes[node]) focusLoopNode(node); }, row));
       card.append(row);
     }
-    (Array.isArray(item.conditions) ? item.conditions : []).forEach((c, i) => {
+    const conditions = multipleValues(item, "conditions");
+    multipleButton(conditions.length ? "重选条件" : "选择条件", () => beginMultiplePick(id, "condition"), card);
+    if (conditions.length > 1) {
+      card.append(Object.assign(document.createElement("p"), { textContent: `旧配置：${conditions.length} 个条件（${item.mode}），原列表保持不变；重选条件将用一个条件替换整个列表。\n${conditions.map(c => `${c?.node}.${c?.output} ${c?.operator} ${JSON.stringify(c?.value)}`).join("；")}` }));
+    }
+    if (conditions.length === 1) {
+      const c = conditions[0], i = 0;
       const row = Object.assign(document.createElement("div"), { className: "multiple-condition" });
-      multipleButton(`重选条件 ${i + 1}`, () => beginMultiplePick(id, "condition", i), row);
       row.append(Object.assign(document.createElement("span"), { textContent: `${conditionalNodeCaption(c?.node)} · ${c?.output || "未选输出"}` }));
       const operator = conditionalSelect(conditionalOperators.map(op => [op, op]), c?.operator, `条件 ${i + 1} 运算符`);
       operator.onchange = () => editMultiple(id, loop => { loop.conditions[i] = { ...loop.conditions[i], operator: operator.value }; });
@@ -318,36 +343,9 @@ function renderMultiFields() {
       value.onchange = () => editMultiple(id, loop => { loop.conditions[i] = { ...loop.conditions[i], value: parseLiteral(value.value) }; });
       multipleField(row, `条件 ${i + 1} 运算符`, operator);
       multipleField(row, `条件 ${i + 1} 比较值`, value);
-      multipleButton(`删除条件 ${i + 1}`, () => editMultiple(id, loop => { loop.conditions.splice(i, 1); }), row);
       card.append(row);
-    });
-    multipleButton(item.conditions?.length ? "＋ 添加条件" : "选择条件", () => beginMultiplePick(id, "condition"), card);
-    const mode = conditionalSelect([["all", "全部通过 (all)"], ["any", "任一通过 (any)"]], item.mode, "条件组合");
-    mode.onchange = () => editMultiple(id, loop => { loop.mode = mode.value; });
-    multipleField(card, "条件组合", mode);
-    const advanced = document.createElement("details");
-    advanced.append(Object.assign(document.createElement("summary"), { textContent: "高级 · 多起终点 / 种子 / 重试限制" }));
-    for (const [field, title] of [["start_nodes", "起点"], ["end_nodes", "终点"], ["seed_nodes", "递增种子"]]) {
-      multipleButton(`画布增删${title}`, () => beginMultiplePick(id, field, null, false, true), advanced);
-      const candidates = Object.keys(state.workflow.nodes).filter(n => !["SaveImagesNode", "FolderImagesNode"].includes(state.workflow.nodes[n].class_type) && (field !== "seed_nodes" || nodeInfo(n).inputs.seed === "INT"));
-      const values = Array.isArray(item[field]) ? item[field] : [];
-      const options = [...new Set([...candidates, ...values])].map(n => [n, conditionalNodeCaption(n)]);
-      const select = conditionalSelect(options, "", `高级${title}（可多选）`); select.multiple = true;
-      [...select.options].forEach(option => { option.selected = values.includes(option.value); });
-      select.onchange = () => editMultiple(id, loop => { loop[field] = [...select.selectedOptions].map(o => o.value); });
-      multipleField(advanced, `高级${title}（可多选）`, select);
-      values.forEach(n => multipleButton(`移除${title} ${n}`, () => editMultiple(id, loop => { loop[field] = loop[field].filter(v => v !== n); }), advanced));
     }
-    advanced.append(Object.assign(document.createElement("p"), { textContent: "不必选择种子。起点的非负 INT seed 自动递增；-1 保持随机。固定 seed 且无递增种子的确定性节点可能每轮相同。最终保存可直接读取已验收的中间结果；其他普通下游消费中间输出时，须显式增加终点。" }));
-    for (const [field, title, min, max] of [["max_iterations", "最大尝试次数", 1, 1000], ["timeout_seconds", "超时秒数（0 禁用）", 0, 86400]]) {
-      const input = Object.assign(document.createElement("input"), { type: "number", min, max, step: field === "max_iterations" ? "1" : "any", value: item[field] ?? "" });
-      input.onchange = () => editMultiple(id, loop => { loop[field] = input.value.trim() ? Number(input.value) : null; });
-      multipleField(advanced, title, input);
-    }
-    const exhausted = conditionalSelect([["fail", "记为失败"], ["skip", "跳过，不保存"]], item.on_exhausted, "耗尽 / 超时策略");
-    exhausted.onchange = () => editMultiple(id, loop => { loop.on_exhausted = exhausted.value; });
-    multipleField(advanced, "耗尽 / 超时策略", exhausted);
-    card.append(advanced); root.append(card);
+    root.append(card);
   });
 }
 
@@ -371,16 +369,57 @@ function renderMulti() {
   const key = JSON.stringify([state.workflow.nodes, state.workflow.conditional_loop, conditionalUI.targetId, conditionalUI.picking]);
   if (key !== conditionalUI.controlsKey) { conditionalUI.controlsKey = key; renderMultiFields(); }
   document.querySelectorAll("#multiple-loops input, #multiple-loops select, #multiple-loops button").forEach(control => { control.disabled = busy; });
+  document.querySelectorAll("button[data-preview-loop-id]").forEach(button => {
+    const problem = validateMultiple(null, button.dataset.previewLoopId);
+    button.disabled = busy || Boolean(problem);
+    button.title = problem || "只预览当前循环；必要上游先通过验收，无关及下游循环不执行，不写盘。";
+  });
+  renderMultiplePreviews();
   document.querySelector("#conditional-badge").textContent = `${multipleLoops().length} 个`;
-  const problem = validateMultiple();
-  const requestKey = !problem ? conditionalPlanKey() : null;
-  if (conditionalUI.planKey !== requestKey && !conditionalUI.checking) { conditionalUI.plan = null; conditionalUI.planKey = null; conditionalUI.error = ""; }
-  document.querySelector("#conditional-error").textContent = problem || conditionalUI.error;
-  const plan = conditionalUI.plan;
-  document.querySelector("#conditional-plan").textContent = conditionalUI.checking ? "正在检查计划（不推理、不写盘）…" : plan ? `最终保存：${plan.target_id}\n${(plan.loops || []).map((item, i) => `${i + 1}. ${item.name || item.id} (${item.id}) · ${item.start_nodes.join("、")} → ${item.end_nodes.join("、")}\n循环体：${item.body_nodes.join("、")} · 最多 ${item.max_iterations} 次`).join("\n")}\n全部循环通过后保存。` : "配置完成后检查计划；服务器按 DAG 排序循环，不推理、不写盘。";
-  document.querySelector("#conditional-check").disabled = Boolean(problem) || busy;
-  document.querySelector("#conditional-run").disabled = Boolean(problem) || busy || !plan || conditionalUI.planKey !== requestKey;
+  const loopProblem = !multipleLoops().length ? validateMultiple(null, "") : multipleLoops().map(item => validateMultiple(null, item?.id)).find(Boolean);
+  document.querySelector("#conditional-error").textContent = loopProblem || conditionalUI.error;
   renderMultipleRoles();
+}
+
+// Reuse node output rendering and the shared task. Keep only the most recent
+// result per loop, not per-attempt images or a second execution scheduler.
+function renderMultiplePreviews() {
+  const job = batch.job;
+  const result = job?.results?.at(-1);
+  for (const [id, snapshot] of Object.entries(job?.visualize === false ? {} : job?.loop_previews || {})) {
+    if (!multipleLoop(id) || !snapshot?.outputs) continue;
+    multipleUI.previews.set(id, { jobId: job.id, previewOnly: Boolean(job.preview_loop_id), required: job.required_loop_ids || [], result: {
+      accepted: snapshot.accepted, iterations: snapshot.iteration, preview: snapshot.outputs,
+    } });
+  }
+  if (job?.visualize !== false && result?.preview && multipleLoop(job.preview_loop_id) && !batchActive()) {
+    multipleUI.previews.set(job.preview_loop_id, { jobId: job.id, previewOnly: true, result, required: job.required_loop_ids || [] });
+  }
+  const visible = visualizeEnabled();
+  document.querySelectorAll(".multiple-preview").forEach(container => {
+    container.hidden = !visible;
+    if (!visible) return; // Keep snapshots even when visualization is disabled.
+    const id = container.dataset.previewLoopId;
+    const saved = multipleUI.previews.get(id);
+    const current = job?.preview_loop_id === id || (saved && saved.jobId === job?.id);
+    const running = current && batchActive();
+    const report = saved?.jobId === job?.id || !current ? saved?.result : result;
+    const key = JSON.stringify([saved?.jobId, saved?.result.iterations, saved?.result.accepted, saved?.result.stop_reason, current && job?.id, current && job?.status, current && job?.error, job?.visualization_revision, state.previewRevision]);
+    if (container.dataset.resultKey === key) return;
+    container.dataset.resultKey = key;
+    container.replaceChildren();
+    if (!current && !saved) return;
+    container.append(Object.assign(document.createElement("p"), { textContent:
+      `循环结果${saved?.previewOnly || job?.preview_loop_id === id ? " · 不写盘" : ""}${running ? " · 运行中…" : report?.accepted ? " · 已通过" : " · 未通过 / 已停止"}${report?.iterations != null ? ` · 第 ${report.iterations} 轮` : ""}\n必要循环：${(current ? job.required_loop_ids || [] : saved?.required || []).join(" → ")}${report?.stop_reason ? `\n停止原因：${report.stop_reason}` : ""}${current && job.error ? `\n错误：${job.error}` : ""}` }));
+    if (saved) {
+      if (current && saved.jobId !== job.id) container.append(Object.assign(document.createElement("p"), { textContent: "下面保留上次有输出的预览，不是本次任务的验收结果。" }));
+      container.append(Object.assign(document.createElement("small"), { textContent: running && saved.jobId === job.id ? "本循环实时最新快照；每轮替换，不保留历史图片。" : "本次任务快照的末轮结果；编辑后请重新预览。" }));
+      Object.entries(saved.result.preview || {}).forEach(([node, outputs]) => {
+        container.append(Object.assign(document.createElement("strong"), { textContent: conditionalNodeCaption(node) }), nodeOutputView(outputs, true));
+      });
+      if (!Object.keys(saved.result.preview || {}).length) container.append(Object.assign(document.createElement("p"), { textContent: "当前循环未产出可预览结果；请查看任务错误或上游验收记录。" }));
+    }
+  });
 }
 
 function renderMultipleRoles() {
@@ -395,7 +434,6 @@ function renderMultipleRoles() {
       const tags = [];
       if (multipleValues(item, "start_nodes").includes(id)) tags.push("起点");
       if (multipleValues(item, "end_nodes").includes(id)) tags.push("终点");
-      if (multipleValues(item, "seed_nodes").includes(id)) tags.push("递增种子");
       if (multipleValues(item, "conditions").some(c => c?.node === id)) tags.push("条件");
       if (tags.length) roles.push(`${i + 1} · ${item.name || item.id}：${tags.join(" / ")}`);
     });
@@ -404,7 +442,7 @@ function renderMultipleRoles() {
     card.classList.toggle("conditional-member", members.length > 0);
     card.classList.toggle("conditional-boundary", roles.length > 0);
     const badge = card.querySelector(".conditional-role"); if (badge) badge.textContent = roles.join(" · ");
-    const eligible = pick && (pick.kind === "target" ? spec.class_type === "SaveImagesNode" : pick.kind === "condition" ? Object.values(nodeInfo(id).outputs).some(type => conditionalScalarTypes.includes(type)) : pick.kind === "seed_nodes" ? nodeInfo(id).inputs.seed === "INT" : !["SaveImagesNode", "FolderImagesNode"].includes(spec.class_type) && !nodeInfo(id).side_effects);
+    const eligible = pick && (pick.kind === "condition" ? Object.values(nodeInfo(id).outputs).some(type => conditionalScalarTypes.includes(type)) : !["SaveImagesNode", "FolderImagesNode"].includes(spec.class_type) && !nodeInfo(id).side_effects);
     card.classList.toggle("conditional-pickable", Boolean(eligible));
   });
   document.querySelectorAll(".port.output").forEach(port => {
@@ -418,3 +456,4 @@ function renderMultipleRoles() {
 document.querySelector("#conditional-add").onclick = event => {
   event?.preventDefault?.(); event?.stopPropagation?.(); addMultipleLoop();
 };
+document.querySelector("#conditional-demo").onclick = addLoopDemo;

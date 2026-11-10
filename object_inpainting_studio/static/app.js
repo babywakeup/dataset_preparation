@@ -1,4 +1,5 @@
-const state = { catalog: {}, workflow: null, layout: {}, selected: null, connecting: null, config: {}, configHelp: {}, nodeResults: {}, nodeResultStale: {}, previewHidden: {}, nodeErrors: {}, expanded: {}, previewSession: null, previewRevision: 0 };
+const state = { catalog: {}, workflow: null, layout: {}, selected: null, connecting: null, config: {}, configHelp: {}, nodeResults: {}, nodeResultStale: {}, nodePreviewStatus: {}, previewHidden: {}, nodeErrors: {}, expanded: {}, previewSession: null, previewRevision: 0, visualize: true, jobVisualizationKey: null };
+const visualizeEnabled = () => state.visualize !== false;
 const workspace = document.querySelector("#workspace");
 const nodesElement = document.querySelector("#nodes");
 const connectionsElement = document.querySelector("#connections");
@@ -304,11 +305,11 @@ function renderNode(id, spec, index) {
     });
   }
   const saveImages = spec.class_type === "SaveImagesNode";
-  const previewButton = Object.assign(document.createElement("button"), { textContent: saveImages ? conditionalEnabled() ? "条件保存当前张 · 查看计划" : "仅保存当前张 · 不循环" : info.side_effects ? "写入节点：仅导出时执行" : "测试此节点 · 自动预览", className: "node-preview-button", disabled: info.side_effects && !saveImages });
+  const previewButton = Object.assign(document.createElement("button"), { textContent: saveImages ? conditionalEnabled() ? "运行当前张 · 达标后保存" : "仅保存当前张 · 不循环" : info.side_effects ? "写入节点：仅导出时执行" : "测试此节点 · 自动预览", className: "node-preview-button", disabled: (info.side_effects && !saveImages) || nodeDeletionDisabled() });
   previewButton.onclick = () => previewNode(id);
   widgets.append(previewButton);
   if (saveImages) {
-    widgets.append(Object.assign(document.createElement("small"), { className: "save-run-hint", textContent: "当前张不会遍历文件夹；启用条件重试时，上方按钮会定位条件计划，只有通过才保存。处理所有图片：开启「↻ 逐张」，再点击画布顶部「运行全部 · 写入磁盘」。" }));
+    widgets.append(Object.assign(document.createElement("small"), { className: "save-run-hint", textContent: "当前张不会遍历文件夹；有循环时自动运行并验收，通过后才保存。处理所有图片：开启「↻ 逐张」，再点击画布顶部「运行全部 · 写入磁盘」。" }));
     const batchButton = Object.assign(document.createElement("button"), { textContent: "↻ 查看逐张流程", className: "node-batch-button", disabled: loopUI.busy });
     batchButton.onclick = () => {
       const sources = upstreamNodes(id).filter(nodeId => state.workflow.nodes[nodeId].class_type === "FolderImagesNode");
@@ -618,7 +619,7 @@ function refreshPreviewState() {
   document.querySelectorAll(".node-preview-shell").forEach(shell => {
     const id = shell.dataset.nodeId;
     shell.querySelector(".preview-state").textContent = state.nodeResultStale[id]
-      ? "历史预览 · 输入或上游可能已变化，需重新测试确认" : "最近一次成功输出";
+      ? "历史预览 · 输入或上游可能已变化，需重新测试确认" : state.nodePreviewStatus[id] || "最近一次成功输出";
     shell.querySelector(".preview-toggle").textContent = state.previewHidden[id] ? "显示预览" : "隐藏预览";
     shell.querySelector(".preview-body").hidden = state.previewHidden[id] === true;
   });
@@ -636,7 +637,7 @@ function nodePreviewView(nodeId, compact = false) {
   const toolbar = Object.assign(document.createElement("div"), { className: "preview-toolbar" });
   const status = Object.assign(document.createElement("small"), {
     className: "preview-state",
-    textContent: state.nodeResultStale[nodeId] ? "历史预览 · 输入或上游可能已变化，需重新测试确认" : "最近一次成功输出",
+    textContent: state.nodeResultStale[nodeId] ? "历史预览 · 输入或上游可能已变化，需重新测试确认" : state.nodePreviewStatus[nodeId] || "最近一次成功输出",
   });
   const toggle = Object.assign(document.createElement("button"), {
     type: "button", className: "preview-toggle",
@@ -695,16 +696,58 @@ function recordPayload() {
   return { target_path: document.querySelector("#target-path").value, mask_path: document.querySelector("#mask-path").value, object_name: document.querySelector("#object-name").value };
 }
 
+function applyJobVisualization() {
+  if (!visualizeEnabled()) return;
+  const job = batch.job;
+  if (!job) return;
+  if (job.visualize === false) {
+    document.querySelector("#run-visualization").replaceChildren(Object.assign(document.createElement("p"), { textContent: "本次运行关闭了可视化；计算和条件判断照常执行。选择「是」后重新运行可查看新结果。" }));
+    return;
+  }
+  const key = JSON.stringify([job.id, job.visualization_revision, job.processed, job.status]);
+  if (state.jobVisualizationKey === key) return;
+  state.jobVisualizationKey = key;
+  const updates = {};
+  Object.values(job.loop_previews || {}).forEach(snapshot => {
+    Object.entries(snapshot.outputs || {}).forEach(([id, outputs]) => {
+      updates[id] = { outputs, caption: `循环第 ${snapshot.iteration} 次 · ${snapshot.accepted ? "通过" : "未通过"}` };
+    });
+  });
+  const result = job.results?.at(-1);
+  Object.entries(result?.preview || {}).forEach(([id, outputs]) => {
+    updates[id] = { outputs, caption: result.accepted ? "本次运行 · 达标结果" : "本次运行 · 未达标末轮" };
+  });
+  Object.entries(updates).forEach(([id, { outputs, caption }]) => {
+    if (!state.workflow?.nodes[id] || state.activeJobId !== job.id || state.activeJobRevision !== state.previewRevision) return;
+    state.nodeResults[id] = outputs;
+    state.nodePreviewStatus[id] = caption;
+    delete state.nodeResultStale[id];
+    const card = document.querySelector(`.node[data-node-id="${CSS.escape(id)}"]`);
+    if (card) { card.querySelector(".node-preview-shell")?.remove(); card.append(nodePreviewView(id, true)); }
+  });
+  if (updates[state.selected] && state.activeJobId === job.id && state.activeJobRevision === state.previewRevision) {
+    document.querySelector("#node-preview").replaceChildren(nodeOutputView(updates[state.selected].outputs, false, state.selected));
+  }
+  const live = document.querySelector("#run-visualization");
+  live.replaceChildren();
+  Object.entries(updates).forEach(([id, { outputs, caption }]) => {
+    live.append(Object.assign(document.createElement("strong"), { textContent: `${id} · ${caption}` }), nodeOutputView(outputs, true));
+  });
+  if (Object.keys(updates).length && conditionalEnabled()) document.querySelector("#conditional-panel").open = true;
+}
+
 function renderBatch() {
+  applyJobVisualization();
   document.querySelectorAll(".node-delete-button").forEach(button => { button.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".swatch-topology-control").forEach(control => { control.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".save-item-add, .save-item-remove, .save-item-name").forEach(control => { control.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".node-batch-button").forEach(button => { button.disabled = loopUI.busy; });
   document.querySelectorAll('.node[data-node-id] .node-preview-button').forEach(button => {
     const spec = state.workflow?.nodes[button.closest(".node").dataset.nodeId];
+    button.disabled = nodeDeletionDisabled() || Boolean(spec && nodeInfo(button.closest(".node").dataset.nodeId).side_effects && spec.class_type !== "SaveImagesNode");
     if (spec?.class_type === "SaveImagesNode") {
       button.disabled = nodeDeletionDisabled();
-      button.textContent = conditionalEnabled() ? "条件保存当前张 · 查看计划" : "仅保存当前张 · 不循环";
+      button.textContent = conditionalEnabled() ? "运行当前张 · 达标后保存" : "仅保存当前张 · 不循环";
     }
   });
   const job = batch.job;
@@ -732,7 +775,8 @@ function renderBatch() {
   const entries = job?.results || [];
   entries.slice(-20).forEach(result => {
     const item = document.createElement("li");
-    item.textContent = `${result.source || "当前图像"}\n${result.error != null ? `失败：${result.error}` : result.accepted === false ? "已跳过 · 未保存" : `已写入：${JSON.stringify(result.paths)}`}${result.iterations != null ? `\n尝试 ${result.iterations} 次 · ${result.accepted ? "通过" : "未通过"}` : ""}${result.stop_reason ? `\n停止原因：${result.stop_reason}` : ""}`;
+    const previewOnly = Boolean(job.preview_node_id || result.preview_loop_id);
+    item.textContent = `${result.source || "当前图像"}\n${result.preview_loop_id ? `循环预览：${result.preview_loop_id} · 未写盘\n` : job.preview_node_id ? `节点预览：${job.preview_node_id} · 未写盘\n` : ""}${result.error != null ? `失败：${result.error}` : previewOnly ? "结果见可视化区域" : result.accepted === false ? "已跳过 · 未保存" : `已写入：${JSON.stringify(result.paths)}`}${result.iterations != null ? `\n尝试 ${result.iterations} 次 · ${result.accepted ? "通过" : "未通过"}` : ""}${result.stop_reason ? `\n停止原因：${result.stop_reason}` : ""}`;
     item.classList.toggle("batch-result-error", result.error != null);
     results.append(item);
   });
@@ -741,11 +785,12 @@ function renderBatch() {
 }
 
 async function batchRequest(operation, nodeId = null, folderTrial = false) {
-  const starting = operation === "start" || operation === "start-condition";
+  const starting = ["start", "start-condition", "preview-loop", "preview-node"].includes(operation);
   if (starting && nodeDeletionDisabled()) return;
+  if (operation === "preview-loop" && validateMultiple(null, nodeId)) return;
   if ((operation === "start" || (operation === "start-condition" && folderTrial)) && (!loopUI.enabled || !loopUI.plan || loopScope().problem || nodeId !== loopUI.targetId || loopUI.planKey !== JSON.stringify(loopPayload()))) return;
   if (operation === "start" && conditionalEnabled() && conditionalValidation(nodeId)) return;
-  if (operation === "start-condition" && (!conditionalEnabled() || conditionalValidation(nodeId) || (!folderTrial && (nodeId !== conditionalUI.targetId || !conditionalUI.plan || conditionalUI.planKey !== conditionalPlanKey())))) return;
+  if (operation === "start-condition" && (!conditionalEnabled() || conditionalValidation(nodeId))) return;
   if (batch.requesting || (starting && batchStartDisabled())) return;
   if (operation === "cancel" && batch.job?.status !== "running") return;
   clearTimeout(batch.timer);
@@ -759,7 +804,10 @@ async function batchRequest(operation, nodeId = null, folderTrial = false) {
     if (starting) {
       state.previewSession = null;
       invalidateResults();
-      batch.job = await api(operation === "start-condition" ? folderTrial ? "/api/batch/preview" : "/api/conditional" : "/api/batch", { method: "POST", body: JSON.stringify({ ...workflowPayload(), record: recordPayload(), config: currentConfig(), node_id: nodeId, continue_on_error: document.querySelector("#batch-continue-on-error").checked }) });
+      const url = operation === "preview-node" ? "/api/node/preview" : operation === "preview-loop" ? "/api/conditional/preview" : operation === "start-condition" ? folderTrial ? "/api/batch/preview" : "/api/conditional" : "/api/batch";
+      batch.job = await api(url, { method: "POST", body: JSON.stringify({ ...workflowPayload(), record: recordPayload(), config: currentConfig(), ...(operation === "preview-loop" ? { loop_id: nodeId } : { node_id: nodeId, continue_on_error: document.querySelector("#batch-continue-on-error").checked }) }) });
+      state.activeJobId = batch.job.id;
+      state.activeJobRevision = state.previewRevision;
     } else if (operation === "cancel") {
       batch.job = await api(`/api/batch/${encodeURIComponent(batch.job.id)}/cancel`, { method: "POST" });
     } else if (operation === "poll" && batch.job) {
@@ -793,20 +841,22 @@ function downloadBatchReport() {
 }
 
 async function previewNode(nodeId, loopTrial = false) {
-  if (loopUI.busy || !state.workflow.nodes[nodeId]) return;
+  if (nodeDeletionDisabled() || !state.workflow.nodes[nodeId]) return;
+  if (conditionalEnabled()) normalizeImportedConditional();
   const button = document.querySelector(`.node[data-node-id="${CSS.escape(nodeId)}"] .node-preview-button`);
   const saving = state.workflow.nodes[nodeId].class_type === "SaveImagesNode";
   if (saving && nodeDeletionDisabled()) return;
   if (loopTrial && (!loopUI.enabled || !loopUI.plan || loopScope().problem)) return;
   if (saving && conditionalEnabled()) {
-    if (loopTrial) return batchRequest("start-condition", nodeId, true);
-    // Never call the ordinary save endpoint while acceptance is enabled.
     conditionalUI.targetId = nodeId;
-    renderBatch();
-    const panel = document.querySelector("#conditional-panel");
-    panel.open = true;
-    panel.scrollIntoView({ block: "nearest" });
-    return setStatus("条件重试已启用：请检查单图计划，再点击「条件运行当前张」。普通保存已阻止，避免写入未通过的结果。");
+    return batchRequest("start-condition", nodeId, loopTrial);
+  }
+  if (!saving && conditionalEnabled()) {
+    const ancestors = new Set(upstreamNodes(nodeId));
+    if (multipleLoops().some(item => [...multipleBody(item)].some(id => ancestors.has(id)))) {
+      state.selected = nodeId;
+      return batchRequest("preview-node", nodeId);
+    }
   }
   state.nodeErrors = {};
   if (loopTrial) { state.previewSession = null; invalidateResults(); }
@@ -828,8 +878,11 @@ async function previewNode(nodeId, loopTrial = false) {
     Object.keys(state.nodeResults).forEach(id => {
       if (upstreamNodes(id).some(ancestor => executed.has(ancestor))) state.nodeResultStale[id] = true;
     });
-    state.nodeResults[nodeId] = result.outputs;
-    delete state.nodeResultStale[nodeId];
+    if (visualizeEnabled() && Object.keys(result.outputs || {}).length) {
+      state.nodeResults[nodeId] = result.outputs;
+      delete state.nodePreviewStatus[nodeId];
+      delete state.nodeResultStale[nodeId];
+    }
     state.selected = nodeId;
     render(); setStatus(`${saving ? "保存成功" : "测试成功"}：${nodeId}。实际执行：${result.executed_nodes.join(" → ")}。${result.reused_nodes?.length ? `复用上游：${result.reused_nodes.join("、")}。` : ""}${saving ? "本次仅保存当前张，未启动循环。遍历文件夹请点击画布顶部「运行全部 · 写入磁盘」。" : "输出已按实际内容自动显示为图像或文本。"}`);
   } catch (error) {
@@ -865,6 +918,10 @@ function resetPreviewState() {
   state.previewSession = null;
   state.nodeResults = {};
   state.nodeResultStale = {};
+  state.nodePreviewStatus = {};
+  state.jobVisualizationKey = null;
+  state.activeJobId = null;
+  state.activeJobRevision = null;
   state.previewHidden = {};
   document.querySelector("#preview-grid").replaceChildren();
   invalidateResults();
@@ -971,7 +1028,7 @@ async function restoreDefault() {
   } catch (error) { setStatus(error.message, true); }
 }
 
-function workflowPayload() { return { workflow: state.workflow }; }
+function workflowPayload() { return { workflow: state.workflow, visualize: visualizeEnabled() }; }
 function currentConfig() {
   return Object.fromEntries(Object.keys(state.config).map(name => [name, parseLiteral(document.querySelector(`#config-${name}`).value)]));
 }
@@ -1059,6 +1116,11 @@ document.querySelectorAll("#target-path, #mask-path, #object-name").forEach(inpu
 document.querySelector("#close-image-dialog").onclick = () => document.querySelector("#image-dialog").close();
 document.querySelector("#batch-cancel").onclick = () => batchRequest("cancel");
 document.querySelector("#batch-refresh").onclick = () => batchRequest("refresh");
+document.querySelector("#visualize").onchange = event => {
+  state.visualize = event.target.value !== "no";
+  document.body.classList.toggle("visualization-off", !visualizeEnabled());
+  renderBatch();
+};
 document.querySelector("#batch-download").onclick = downloadBatchReport;
 workspace.addEventListener("click", event => { if (event.target === workspace) { state.connecting = null; render(); } });
 batchRequest("refresh");

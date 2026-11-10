@@ -34,11 +34,6 @@ button:hover, .button:hover { background: #34405c; }
 .conditional-role:empty { display: none; }
 .port.conditional-pick-port { background: #ffe198; box-shadow: 0 0 0 4px #f3cf8044; }
 .port.conditional-selected-port { border-color: #a4f0d7; box-shadow: 0 0 0 3px #68dc9a66; }
-.conditional-picker, .conditional-references { grid-column: 1 / -1; }
-.conditional-picker { padding: 8px; border: 1px solid #54877b; border-radius: 6px; background: #183330; }
-.conditional-picker p { margin: 0 0 6px; color: #c3e9db; }
-.conditional-reference, .conditional-condition-tools { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0; }
-.conditional-reference button { font-size: 10px; overflow-wrap: anywhere; text-align: left; }
 .node-header { padding: 9px; cursor: grab; border-bottom: 1px solid #3a445d; font-size: 13px; font-weight: 700; background: #28324a; border-radius: 7px 7px 0 0; }
 .node-header:active { cursor: grabbing; }
 .node-header { position: relative; padding-right: 36px; overflow-wrap: anywhere; }
@@ -191,12 +186,8 @@ img.alpha-preview { background-color: #fff; background-image: repeating-conic-gr
 #conditional-panel { flex: 1 1 45%; min-width: 260px; max-height: 55vh; overflow: auto; padding: 14px; border-left: 1px solid #57618b; border-bottom: 1px solid #57618b; background: #202337f5; }
 #conditional-panel > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: #d3ccff; }
 #conditional-badge { font-size: 10px; color: #aba7ce; }
-.conditional-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.conditional-actions button { font-size: 11px; }
-#conditional-run { background: #50447e; border-color: #9c8acb; }
 #conditional-error { color: #ffb0a7; white-space: pre-wrap; }
-#conditional-plan { color: #c9c1f1; white-space: pre-wrap; overflow-wrap: anywhere; }
-#conditional-error:empty, #conditional-plan:empty { display: none; }
+#conditional-error:empty { display: none; }
 #conditional-attempts { padding-left: 20px; max-height: 240px; overflow: auto; }
 #conditional-attempts li { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; padding: 5px 0; }
 .conditional-role { display: block; font-size: 10px; white-space: pre-wrap; color: var(--conditional-color, #d0bbff); margin-top: 5px; }
@@ -210,13 +201,15 @@ img.alpha-preview { background-color: #fff; background-image: repeating-conic-gr
 #conditional-panel > summary { min-height: 28px; }
 #multiple-loops[hidden] { display: none; }
 .multiple-empty, .multiple-hint { padding: 10px; border: 1px dashed #81729e; border-radius: 8px; color: #d3caed; }
-.multiple-target { background: #142a2a; border: 1px solid #487e71; border-radius: 8px; padding: 10px; margin: 10px 0; }
 .multiple-loop-card { border: 1px solid var(--conditional-color); border-left-width: 5px; border-radius: 10px; padding: 12px; margin: 12px 0; background: #191e30; }
 .multiple-loop-card > strong { color: var(--conditional-color); }
-.multiple-loop-card button, .multiple-target button { font-size: 11px; margin: 3px; }
-.multiple-loop-card details { border-top: 1px solid #42475f; padding-top: 8px; margin-top: 8px; }
-.multiple-loop-card summary { cursor: pointer; font-size: 11px; color: #b6bcd6; }
-.multiple-loop-card select[multiple] { min-height: 90px; }
+.multiple-loop-card button { font-size: 11px; margin: 3px; }
+.visualization-choice { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.visualization-choice select { width: auto; }
+.visualization-off .node-preview-shell, .visualization-off #node-preview, .visualization-off .run-visualization-section, .visualization-off .multiple-preview { display: none; }
+.multiple-preview:empty { display: none; }
+.multiple-preview { border: 1px solid #42475f; border-radius: 6px; padding: 8px; margin: 8px 0; }
+.multiple-preview p { white-space: pre-line; }
 .multiple-role-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 6px 0; }
 .multiple-condition { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 0; border-top: 1px solid #3c4056; }
 .multiple-condition > span { flex-basis: 100%; font-size: 11px; overflow-wrap: anywhere; }

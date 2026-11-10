@@ -29,6 +29,18 @@ FIELD_NAMES = {
 # Only semantic exceptions belong here. Ordinary RGB / RGBA / Mask ports inherit
 # their common format name, and a role explains which image a node produces.
 PORT_NAMES = {
+    "LoopDemoImageNode": {
+        "inputs": {"seed": ("seed", "默认 0，七色周期；-1 随机", "INT"),
+                   "image": ("rgb_image", "可选文件夹原图，左上角添加颜色标记", "rgb_image")},
+        "outputs": {
+            "image": ("rgb_image", "原尺寸标记图；无输入时 32×32 色图", "rgb_image"),
+            "value": ("value", "本轮实际 seed", "INT"),
+        },
+    },
+    "LoopDemoScoreNode": {
+        "inputs": {"image": ("rgb_image", "待评分 RGB 图", "rgb_image")},
+        "outputs": {"score": ("score", "左上角 32×32 标记蓝通道均值，蓝为 255", "FLOAT")},
+    },
     "LoadTargetNode": {
         "inputs": {"path": ("rgb_image_path", "原图路径", "rgb_image_path")},
         "outputs": {"target": ("rgb_image", "原图", "rgb_image")},

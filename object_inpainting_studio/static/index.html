@@ -42,6 +42,7 @@
       </aside>
       <section id="workspace-wrap">
         <div id="execution-toolbars">
+        <label class="visualization-choice">可视化<select id="visualize" aria-label="可视化"><option value="yes" selected>是</option><option value="no">否</option></select></label>
         <section id="loop-toolbar" aria-labelledby="loop-title">
           <div class="loop-heading"><strong id="loop-title">↻ 文件夹逐张处理</strong><span id="loop-mode">单张调试</span></div>
           <p id="loop-summary">添加文件夹节点，开启「↻ 逐张」，自动标出重复执行的路径。</p>
@@ -60,15 +61,10 @@
         </section>
         <details id="conditional-panel">
           <summary>↻ 条件循环 <span id="conditional-badge"></span><button id="conditional-add" type="button">＋ 添加循环</button></summary>
-          <p>添加后依次点击具体节点标题：起点 → 终点 → 条件。起终点是普通计算节点；所有循环通过后，才写入公用保存目标。独立 / 串联循环按数据依赖自动排序，不支持重叠或嵌套。</p>
+          <p>只需依次点选 start 起点 → end 终点 → condition 条件，并填写判断条件。点击循环或下游节点的“测试”即可运行并查看变化；只有达标结果才会交给下游。可视化默认开启。</p>
+          <button id="conditional-demo" type="button">添加无模型示例 · 不替换原流程</button>
           <div id="multiple-loops"></div>
           <p id="conditional-error" role="alert"></p>
-          <p id="conditional-plan" role="status" aria-live="polite"></p>
-          <div class="conditional-actions">
-            <button id="conditional-check">检查单图计划 · 不推理 / 不写盘</button>
-            <button id="conditional-run" disabled>条件运行当前张 · 通过后保存</button>
-          </div>
-          <p>文件夹模式使用左侧的试跑 / 运行全部。非负 literal seed 可自动逐轮递增；seed=-1 保持随机，不必先选种子。超时和停止仅在节点之间检查，不会强杀 GPU 推理。</p>
         </details>
         </div>
         <div id="workspace"><div id="loop-region" hidden><strong>↻ 每张图片执行一次</strong><span></span></div><svg id="connections"></svg><div id="nodes"></div></div>
@@ -91,6 +87,7 @@
           </div>
           <progress id="batch-progress" max="1" value="0" aria-label="批量文件处理进度"></progress>
           <pre id="batch-current"></pre>
+          <section class="run-visualization-section" aria-label="本次运行可视化"><h3>本次运行可视化</h3><div id="run-visualization"></div></section>
           <details id="conditional-history"><summary>当前图片 · 条件尝试记录（仅标量）</summary><ol id="conditional-attempts"></ol></details>
           <p id="batch-error" role="alert"></p>
           <div class="batch-actions">
@@ -98,7 +95,7 @@
             <button id="batch-refresh">刷新 / 重试</button>
             <button id="batch-download" disabled>下载 JSON 报告</button>
           </div>
-          <p>停止需等待当前节点返回，不会强制中断节点。任务仅保存在服务进程内：刷新页面会恢复最近任务，服务重启则丢失任务记录（已写入文件保留）。报告只记录源文件、输出路径或错误，不保存预览图片。</p>
+          <p>图片随运行更新，尝试记录保留每轮评分。选择“可视化：否”只关闭展示，不改变循环判断。停止需等当前节点返回；任务仅在本次服务进程内保留。</p>
           <details><summary id="batch-results-label">文件结果</summary><ol id="batch-results"></ol></details>
         </section>
         <hr />

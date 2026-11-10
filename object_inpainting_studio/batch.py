@@ -60,7 +60,10 @@ class BatchJobs:
                 job["status"] = "cancelling"
             return deepcopy(job)
 
-    def start(self, graph, context, source_id, target_id, paths, start_index, continue_on_error, *, conditional=None):
+    def start(self, graph, context, source_id, target_id, paths, start_index, continue_on_error, *,
+              conditional=None, preview_serializer=None, visualize=True):
+        if type(visualize) is not bool:
+            raise ValueError("visualize 必须是布尔值。")
         with self.lock:
             if any(job["status"] in {"running", "cancelling"} for job in self.jobs.values()):
                 raise ValueError("已有批量任务运行中，请先等待完成或停止。")
@@ -96,12 +99,22 @@ class BatchJobs:
                 "max_iterations": conditional.max_iterations if conditional is not None else 0,
                 "iteration_history": [],
                 "stop_reason": None,
+                "visualize": visualize,
+                "loop_previews": {},
+                "visualization_revision": 0,
             }
+            if getattr(conditional, "preview_loop_id", None) is not None:
+                job.update(preview_loop_id=conditional.preview_loop_id,
+                           required_loop_ids=[item["id"] for item in conditional.loops])
+            if getattr(conditional, "preview_node_id", None) is not None:
+                job.update(preview_node_id=conditional.preview_node_id,
+                           required_loop_ids=[item["id"] for item in conditional.loops])
             self.jobs[job_id] = job
             self.cancels[job_id] = cancel
             thread = Thread(
                 target=self._run,
-                args=(job_id, graph, context, source_id, target_id, tuple(paths), start_index, conditional),
+                args=(job_id, graph, context, source_id, target_id, tuple(paths), start_index,
+                        conditional, preview_serializer),
                 daemon=True,
             )
             self.threads[job_id] = thread
@@ -109,9 +122,30 @@ class BatchJobs:
             thread.start()
             return snapshot
 
-    def _run(self, job_id, graph, context, source_id, target_id, paths, start_index, conditional=None):
+    def _run(self, job_id, graph, context, source_id, target_id, paths, start_index, conditional=None,
+             preview_serializer=None):
         cancel = self.cancels[job_id]
         job = self.jobs[job_id]
+
+        def serialize(outputs):
+            if not job["visualize"] or preview_serializer is None:
+                return {}
+            return {node: {name: preview_serializer(value) for name, value in values.items()}
+                    for node, values in outputs.items()}
+
+        def progress(update):
+            update = dict(update)
+            snapshot = update.pop("loop_preview", None)
+            if snapshot is not None and job["visualize"] and preview_serializer is not None:
+                snapshot = {**snapshot, "outputs": serialize(snapshot["outputs"])}
+            else:
+                snapshot = None
+            with self.lock:
+                job.update(update)
+                if snapshot is not None:
+                    job["loop_previews"][snapshot["loop_id"]] = snapshot
+                    job["visualization_revision"] += 1
+
         try:
             for index in range(start_index, len(paths)):
                 if cancel.is_set():
@@ -127,6 +161,12 @@ class BatchJobs:
                     job["current_loop_count"] = 0
                     job["iteration_history"] = []
                     job["stop_reason"] = None
+                    job["loop_previews"] = {}
+                    # Keep images for the current input only, not a folder's
+                    # entire image history. Scalar reports remain available.
+                    for previous in job["results"]:
+                        if "preview" in previous:
+                            previous["preview"] = {}
                 try:
                     if conditional is not None:
                         initial = {}
@@ -136,12 +176,10 @@ class BatchJobs:
                             except Exception as error:
                                 raise NodeExecutionError(source_id, graph.nodes[source_id]["class_type"], error) from error
 
-                        def progress(update):
-                            with self.lock:
-                                job.update(update)
-
                         result = {"source": str(path) if path is not None else "current",
                                   **run_conditional(conditional, context, cancel, progress, initial)}
+                        if "preview" in result:
+                            result["preview"] = serialize(result["preview"])
                     else:
                         execution = BatchExecution(graph, context, cancel)
                         try:
@@ -152,7 +190,11 @@ class BatchJobs:
                             with self.lock:
                                 job["current_node"] = node_id
                             execution.get_node(node_id)
-                        result = {"source": str(path), "paths": execution.cache[target_id]["paths"]}
+                            progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
+                                      "accepted": node_id == target_id,
+                                      "outputs": {node_id: execution.cache[node_id]}}})
+                        result = {"source": str(path), "paths": execution.cache[target_id]["paths"],
+                                  "preview": serialize({target_id: execution.cache[target_id]})}
                 except GraphExecutionCancelled:
                     with self.lock:
                         job["stop_reason"] = "cancelled"

@@ -54,15 +54,24 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 
 ## 条件循环回归
 
-- [后端测试](test_conditional_loop.py)：26 项 CPU 用例，真实 PIL / 临时 PNG 保存，覆盖固定祖先只执行一次、循环体逐轮执行、输入原地修改隔离、达标图像与评分 / 种子同轮、AND 不跨轮拼接 / OR 全部分支计算、布尔 / 数字条件、作用域与副作用限制、耗尽失败 / 跳过、异常不重试、取消、模拟时钟超时（含保存依赖返回后的拦截）、单图 API / 普通保存防绕过、任务互斥、文件夹逐图独立缓存、字面图片解码和过滤索引一致的异步试跑。用 Event / join 而非等待轮询，不加载模型。
-- [前端条件控制测试](test_conditional_loop.js)：21 项覆盖唯一多循环界面的计划检查、标量 / 种子校验、单图 / 文件夹异步提交、普通保存拦截、进度历史、焦点和请求状态不确定时禁止重复提交。移除已不存在的旧控件测试；各 VM harness 均加载正式的多循环控制器，不伪造旧 DOM 保留死代码。
-- [浏览器测试](test_object_inpainting_studio_browser.py) 的 `test_conditional_retry_ui_checks_plan_saves_only_accepted_attempt` 从实际控件配置条件，以 CPU 图片替代 FLUX.execute；检查计划零推理 / 零写盘，seed=0 红图失败、seed=1 蓝图达标，仅保存后者。外部 `STUDIO_TEST_URL` 模式跳过，不证明真实模型质量。
-- 同文件 `test_conditional_canvas_picker_selects_exact_instances_and_ports` 在 Chromium 中恢复旧 flat 配置，确认旧 DOM 已完全移除、配置自动转成新卡片，保留第二个同类分支及条件 / 种子 / 重试策略；用新按钮、标题和端口验证错误候选不改选、已有连线不变、角色高亮、精确定位、历史预览和往返。不运行模型。单循环达标保存用例也已切换为新点击向导。
-- [多循环后端](test_multiple_conditional_loops.py)：47 项 CPU / PIL 测试，覆盖独立重试、串联及反序配置按 DAG 排序、bridge 缓存、显式 end 强制执行、所选保存读取验收中间图、后循环失败无写盘、变异隔离、取消 / 超时、旧 flat 兼容、API 与文件夹逐图重置、32 个循环、非法 ID / 混写 / 重叠 / 逃逸、多个 SaveImages 中仅执行所选切片并写其目录。
-- [多循环前端](test_multiple_loops.js)：39 项真实控制器 / DOM 用例，覆盖自动向导、同类实例独立编辑删除、精确条件端口、种子、范围校验、焦点、运行锁、预览与进度，并验证旧 DOM / handler / renderer 不存在、有效 / 无效 flat 自动迁移、只补缺省、不替换失效目标、不改原输入、坏原始值显式删除、下载导入只生成新格式。全部前端运行 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js tests/test_swatch_outputs.js tests/test_multiple_loops.js`。
-- 浏览器 `test_multiple_loop_wizard_runs_each_region_and_saves_once` 从折叠面板的 Add 开始，仅点标题配置两个循环，评分节点直接作为 end，逐轮 seed=0/1 和 10/11 分别失败再通过；以 CPU 图替代 FLUX，检查计划无推理写盘，实际保存两张蓝图、前序无重复生成、报告 / 输入焦点 / 真实下载导入 / 删除最后循环恢复普通保存。
-- 删除旧界面后的最新实测：全部前端 JS 108 项、重点 Chromium 5 项（多循环向导 / 旧配置自动迁移及实例点选 / 新向导达标保存 / 动态色块 / 缓存保存）通过。后端本轮未修改、未重跑非浏览器 Python；前次 293 项通过。未运行完整浏览器套件，未验证真实模型。
-- 在数据准备目录、选定虚拟环境中可运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" ../.venv/bin/python -m unittest test_conditional_loop -v`；前端运行 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js`。
+### 本轮实际验证（2026-11-10）
+
+以下为本轮已实际执行的结果；核心测试之外补跑了扩展回归，不代表完整套件通过。
+
+- **前端：五个文件共 140 项，全部通过。** 命令：`node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js tests/test_swatch_outputs.js tests/test_multiple_loops.js`。覆盖三项点选 / condition operator-value、旧高级控件已删除而 JSON 参数不丢失、flat 迁 loops、自动条件保存、节点预览请求与异步任务锁、逐轮快照 / revision、关闭可视化及焦点 / 历史快照。
+- **Python：已选环境 Python 3.12.13，149 项通过，无跳过。** 项目及 tests 在 `PYTHONPATH`；PowerShell 执行 `& $selectedenv -m unittest test_loop_preview test_loop_downstream test_loop_demo test_multiple_conditional_loops test_conditional_loop test_node_contracts -q`，其中 `$selectedenv` 指向已选解释器，不固定机器路径。
+- **扩展 Python：222 项通过，无跳过。** 同一环境执行 `& $selectedenv -m unittest test_loop_preview test_loop_downstream test_loop_demo test_multiple_conditional_loops test_conditional_loop test_node_contracts test_object_inpainting_studio test_folder_batch_node test_preview_cache test_node_errors test_save_images_node test_port_names -q`。包含真实保存像素 / 模式、最新文件夹快照而非全量图片历史、跨请求缓存及 Windows 临时目录别名路径比较；未为通过测试改变生产路径规则。
+- **真实 Chromium：inprocess 模式 6 项通过**，位于 [浏览器测试](test_object_inpainting_studio_browser.py)：4 项更新循环用例 + 2 项新增 CPU 下游 / 关闭可视化用例。以 Event 阻塞确保页面实际看到红 / 绿 / 蓝各轮，而非只断言最终结果；核对普通下游值 255、生成 seed=0/1/2 无重跑、阈值 256 显示失败末轮及未通过。更新用例还验证三项向导、直接点 SaveImages 自动校验保存、旧参数迁移与具体实例绑定；不依赖已删除的高级控件或手动计划按钮。
+
+### 覆盖入口与边界
+
+- [无保存循环预览](test_loop_preview.py)：独立 / 依赖循环切片、无保存 / 空目录、无关坏配置隔离、必要上游验收、末轮耗尽 / 超时、JSON 图片序列化、副作用拦截、缓存隔离及共享任务锁 / 取消。
+- [普通节点条件预览](test_loop_downstream.py)：普通节点消费任意循环内部输出及循环内部节点测试时，`/api/node/preview` 自动识别必要循环，先验收后用达标缓存算目标，无需追加 end，无额外生成；失败不跑普通下游。直接 flat 普通节点测试返回 422，flat 正式条件保存仍兼容；关闭可视化不序列化图片而不改变计算。
+- [演示节点](test_loop_demo.py)：实际 CPU / PIL 红绿蓝周期、蓝通道评分、输入 / 合同 / catalog / API、达标缓存保存及失败不写盘，不下载模型。
+- [多循环](test_multiple_conditional_loops.py)、[条件执行](test_conditional_loop.py) 及 [节点合同](test_node_contracts.py)：DAG 依赖排序、固定 / 验收缓存隔离、同轮评分、显式 end、保存一次、种子 / 逐文件重置、失败 / 异常 / 取消 / 超时、副作用及重叠拒绝、API 兼容与 TypedDict 合同。旧 all / any 等后端兼容测试不意味着当前 UI 仍暴露高级设置。
+- 测试 agent 已通过工具将 scikit-image、Playwright 及 Chromium 装入已选环境，**无模型下载**。未运行完整 Python 或浏览器套件，部分其他模块缺 diffusers；未真实 SAM / FLUX 推理，CPU 替代输出和演示不证明模型质量。
+- 未重启用户业务服务，临时测试服务器已关闭；用户启动脚本及模块入口自有改动保留不覆盖。节点内 GPU 调用不可强杀，不支持重叠 / 嵌套 / 反馈。
+- 最终前端 140 项重跑通过；另重跑两项关键下游 / 可视化 Chromium 用例通过。三个前端模块语法、相关代码编辑器诊断及 `git diff --check` 通过。本节仅记录上述实际测试，不能把前次 124 项 JS / Python 未执行或更早 108 / 293 项记录当作当前结果。
 
 ## pytest
 
@@ -99,7 +108,7 @@ node --test tests/test_node_editing.js
 
 ## 节点输入输出合同测试
 
-使用已选虚拟环境和项目 `PYTHONPATH`，运行 `-m unittest discover -s tests -p 'test_node_contracts.py' -v`。9 项测试覆盖全部 27 个节点：TypedDict schema、每个 `execute` 参数注解与输入类一致、返回注解与输出类一致、自动生成端口表、语义图像类别、默认参数、旧类导入 / 自定义节点兼容和 Studio catalog。类型设计详见 [节点类型指南](../docs/NODE_TYPES.md)。
+使用已选虚拟环境和项目 `PYTHONPATH`，运行 `-m unittest discover -s tests -p 'test_node_contracts.py' -v`。9 项测试覆盖全部 30 个节点：TypedDict schema、每个 `execute` 参数注解与输入类一致、返回注解与输出类一致、自动生成端口表、语义图像类别、默认参数、旧类导入 / 自定义节点兼容和 Studio catalog。类型设计详见 [节点类型指南](../docs/NODE_TYPES.md)。
 
 ## 动态保存项与命名测试
 

@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "workflow": {
+    "nodes": {
+      "folderimages": {
+        "class_type": "FolderImagesNode",
+        "inputs": {
+          "dir": "D:\\codes\\code_judge\\source\\SD-1\\templates2",
+          "recursive": 0,
+          "index": 0
+        }
+      },
+      "loopdemoimage": {
+        "class_type": "LoopDemoImageNode",
+        "inputs": {
+          "seed": 0,
+          "image": {
+            "node": "folderimages",
+            "output": "image"
+          }
+        }
+      },
+      "loopdemoimage_2": {
+        "class_type": "LoopDemoImageNode",
+        "inputs": {
+          "seed": {
+            "node": "loopdemoimage",
+            "output": "value"
+          },
+          "image": null
+        }
+      },
+      "saveimages": {
+        "class_type": "SaveImagesNode",
+        "inputs": {
+          "img1": {
+            "node": "loopdemoimage_2",
+            "output": "image"
+          },
+          "img2": null,
+          "img3": null,
+          "img4": null,
+          "images": null,
+          "dir": "./tttt",
+          "filename": ""
+        },
+        "save_items": [
+          {
+            "id": "img1",
+            "name": ""
+          },
+          {
+            "id": "img2",
+            "name": ""
+          },
+          {
+            "id": "img3",
+            "name": ""
+          },
+          {
+            "id": "img4",
+            "name": ""
+          }
+        ],
+        "save_next_id": 5
+      },
+      "loopdemoscore": {
+        "class_type": "LoopDemoScoreNode",
+        "inputs": {
+          "image": {
+            "node": "loopdemoimage_2",
+            "output": "image"
+          }
+        }
+      }
+    },
+    "outputs": {},
+    "conditional_loop": {
+      "loops": [
+        {
+          "id": "loop_1",
+          "name": "循环 1",
+          "start_nodes": [
+            "loopdemoimage"
+          ],
+          "end_nodes": [
+            "loopdemoscore"
+          ],
+          "seed_nodes": [
+            "loopdemoimage"
+          ],
+          "conditions": [
+            {
+              "node": "loopdemoscore",
+              "output": "score",
+              "operator": "<=",
+              "value": 10
+            }
+          ],
+          "mode": "all",
+          "max_iterations": 10,
+          "timeout_seconds": 0,
+          "on_exhausted": "fail"
+        }
+      ]
+    }
+  },
+  "layout": {
+    "folderimages": {
+      "x": 176.25,
+      "y": 102.5
+    },
+    "loopdemoimage": {
+      "x": 593.75,
+      "y": 198.75
+    },
+    "loopdemoimage_2": {
+      "x": 916.25,
+      "y": 196.25
+    },
+    "saveimages": {
+      "x": 1515,
+      "y": 0
+    },
+    "loopdemoscore": {
+      "x": 1251.25,
+      "y": 301.25
+    }
+  },
+  "config": {
+    "resolution": 1024,
+    "reference_resolution": 512,
+    "dilation_radius": 4,
+    "reference_padding": 0.1,
+    "min_object_fraction": 0.01,
+    "max_object_fraction": 0.6,
+    "validation_fraction": 0.1,
+    "seed": 42
+  },
+  "loop": {
+    "sourceId": "folderimages",
+    "targetId": "saveimages",
+    "enabled": true,
+    "conditionalTargetId": "saveimages"
+  }
+}

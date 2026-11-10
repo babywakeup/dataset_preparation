@@ -1,5 +1,7 @@
 """CPU-only conditional task regressions; no model, sleeps, or status polling."""
 
+import base64
+import io
 import json
 import tempfile
 import unittest
@@ -476,7 +478,36 @@ class ConditionalLoopTests(unittest.TestCase):
         self.assertEqual((final["current_iteration"], final["stop_reason"], final["current_node"]), (2, "accepted", None))
         self.assert_saved(final["results"][0], (20, 8, 40))
         self.assertEqual(self.client.get("/api/batch/latest").json()["job"], final)
-        self.assertNotIn("data:image", json.dumps(final))
+        self.assertTrue(final["visualize"])
+        self.assertEqual(final["visualization_revision"], 2)
+        self.assertEqual(set(final["loop_previews"]), {"flat"})
+        preview = final["loop_previews"]["flat"]
+        self.assertEqual((preview["loop_id"], preview["iteration"], preview["accepted"]), ("flat", 2, True))
+        self.assertEqual(set(preview["outputs"]), {"generate", "score_a"})
+        generated = preview["outputs"]["generate"]
+        self.assertEqual(generated["seed"], {"kind": "text", "value": 8})
+        self.assertEqual(preview["outputs"]["score_a"]["score"], {"kind": "text", "value": 1.0})
+        image_output = generated["image"]
+        self.assertEqual((image_output["kind"], image_output["mode"], image_output["size"]),
+                         ("image", "RGB", [3, 2]))
+        header, encoded = image_output["image"].split(",", 1)
+        self.assertEqual(header, "data:image/png;base64")
+        with Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.tobytes(), bytes((20, 8, 40)) * 6)
+        history = final["iteration_history"]
+        self.assertEqual(history, final["results"][0]["history"])
+        self.assertEqual([entry["seeds"] for entry in history], [{"generate": 7}, {"generate": 8}])
+        self.assertEqual([entry["scores"][0]["value"] for entry in history], [0.0, 1.0])
+        self.assertEqual([entry["accepted"] for entry in history], [False, True])
+        for entry in history:
+            self.assertEqual(set(entry), {"iteration", "seeds", "scores", "accepted", "elapsed_seconds"})
+            self.assertEqual(set(entry["scores"][0]), {"node", "output", "value", "passed"})
+        without_previews = {key: value for key, value in final.items() if key != "loop_previews"}
+        self.assertNotIn("data:image", json.dumps(without_previews))
+        self.assertEqual(self.calls["generate"], [7, 8])
+        self.assertEqual(self.calls["save"], [(20, 8, 40)])
+        self.assertEqual(len(list(self.output.rglob("*.png"))), 1)
         snapshot = self.manager.get(final["id"])
         snapshot["iteration_history"].clear()
         self.assertEqual(len(self.manager.get(final["id"])["iteration_history"]), 2)

@@ -33,6 +33,7 @@ function controller() {
       this.style = { setProperty(name, value) { this[name] = value; } };
       this.attributes = {};
       this.value = "";
+      this.checked = false;
       this.classList = {
         contains: name => (this.className || "").split(/\s+/).includes(name),
         toggle: (name, force) => {
@@ -82,7 +83,13 @@ function controller() {
     closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
     scrollIntoView(options) { this.scrolled = options; }
     click() { if (!this.disabled) this.dispatchEvent({type: "click"}); }
-    remove() {}
+    remove() {
+      if (!this.parentElement) return;
+      const siblings = this.parentElement.children;
+      const index = siblings.indexOf(this);
+      if (index !== -1) siblings.splice(index, 1);
+      this.parentElement = null;
+    }
     focus() { document.activeElement = this; }
   }
   const elements = new Map();
@@ -90,7 +97,7 @@ function controller() {
     body: new Element(),
     createElement: tag => new Element(tag),
     querySelector(selector) {
-      if (/^#conditional-(enabled|legacy|legacy-controls|fields)$/.test(selector)) return null;
+      if (/^#conditional-(enabled|legacy|legacy-controls|fields|check|run|plan)$/.test(selector)) return null;
       if (!/^#[\w-]+$/.test(selector)) return this.querySelectorAll(selector)[0] || null;
       if (!elements.has(selector)) elements.set(selector, Object.assign(new Element(), {id: selector.slice(1)}));
       return elements.get(selector);
@@ -179,10 +186,6 @@ function conditionalButton(ui, caption) {
   return button;
 }
 
-function checked(ui) {
-  ui.run("conditionalUI.plan = {target_id: 'save', loops: []}; conditionalUI.planKey = conditionalPlanKey();");
-}
-
 function folder(ui) {
   ui.run(`
     state.workflow.nodes.folder = {class_type: 'FolderImagesNode', inputs: {dir: '/in', index: 0}};
@@ -192,6 +195,21 @@ function folder(ui) {
     loopUI.planKey = JSON.stringify(loopPayload());
   `);
 }
+
+test("folder scope includes conditional scoring branches outside save ancestry", () => {
+  const ui = controller(); folder(ui);
+  assert.equal(ui.run("loopScope().ancestors.has('score')"), true);
+  assert.equal(ui.run("loopScope().repeated.has('score')"), true);
+  assert.equal(ui.run("loopScope().ancestors.has('alt')"), true);
+  assert.equal(ui.run("loopScope().repeated.has('alt')"), false);
+  const score = canvasCard(ui, "score");
+  ui.document.querySelector("#loop-region").append(ui.document.createElement("span"));
+  ui.run("renderLoop()");
+  assert.equal(score.querySelector(".loop-role").textContent, "每张执行");
+  assert.equal(score.classList.contains("loop-outside"), false);
+  ui.run("delete state.workflow.conditional_loop");
+  assert.equal(ui.run("loopScope().ancestors.has('score')"), false);
+});
 
 test("repeat boundary uses explicit multi-roots and relevant descendants, never the save", () => {
   const ui = controller();
@@ -233,7 +251,7 @@ test("invalid card fields block without silently repairing user values", () => {
     assert.notEqual(ui.run("conditionalValidation()"), "", mutation);
     ui.run("renderConditional()");
     assert.equal(ui.run("JSON.stringify(state.workflow.conditional_loop)"), before, mutation);
-    assert.equal(ui.document.querySelector("#conditional-run").disabled, true, mutation);
+    assert.notEqual(ui.document.querySelector("#conditional-error").textContent, "", mutation);
   }
 });
 
@@ -256,7 +274,7 @@ test("deleting folder target never silently selects the remaining save branch", 
 test("null disables acceptance, Add replaces it, new workflow resets transient state", () => {
   const ui = controller(); ui.run("state.workflow.conditional_loop = null; renderConditional()");
   assert.equal(ui.run("conditionalEnabled()"), false);
-  assert.equal(ui.document.querySelector("#conditional-check").disabled, true);
+  assert.equal(ui.document.querySelector("#conditional-check"), null);
   ui.document.querySelector("#conditional-add").click();
   assert.equal(ui.run("multipleLoops().length"), 1);
   ui.run("startPractice()");
@@ -265,45 +283,44 @@ test("null disables acceptance, Add replaces it, new workflow resets transient s
   assert.equal(ui.run("multipleUI.activeId"), null);
 });
 
-test("plan check sends exact payload and synchronously locks editing until response", async () => {
+test("SaveImages automatically submits validation with exact payload and locks editing until response", async () => {
   const ui = controller();
-  ui.run(`fetch = (url, options) => { requests.push({url, body: JSON.parse(options.body)}); return new Promise(resolve => {globalThis.finish = () => resolve({ok: true, text: async () => JSON.stringify({target_id: 'save', loops: []})});}); };`);
-  const promise = ui.run("checkConditionalPlan()");
-  assert.equal(ui.run("conditionalUI.checking"), true);
+  ui.run(`fetch = (url, options) => { requests.push({url, body: JSON.parse(options.body)}); return new Promise(resolve => {globalThis.finish = () => resolve({ok: true, text: async () => JSON.stringify(reply)});}); };`);
+  const before = plain(ui.run("state.workflow"));
+  const promise = ui.run("previewNode('save')");
+  assert.equal(ui.run("batch.starting && batch.requesting"), true);
   assert.equal(ui.run("nodeDeletionDisabled()"), true);
   assert.equal(ui.document.querySelector("#conditional-add").disabled, true);
-  assert.equal(ui.run("requests[0].url"), "/api/conditional/plan");
-  assert.deepEqual(plain(ui.run("Object.keys(requests[0].body).sort()")), ["config", "node_id", "record", "workflow"]);
+  assert.equal(ui.run("requests[0].url"), "/api/conditional");
+  assert.deepEqual(plain(ui.run("Object.keys(requests[0].body).sort()")), ["config", "continue_on_error", "node_id", "record", "visualize", "workflow"]);
+  assert.equal(ui.run("requests[0].body.node_id"), "save");
+  assert.equal(ui.run("requests[0].body.visualize"), true);
+  assert.deepEqual(plain(ui.run("requests[0].body.workflow")), before);
   assert.deepEqual(plain(ui.run("Object.keys(requests[0].body.workflow.conditional_loop)")), ["loops"]);
   ui.run("editMultiple(multipleLoops()[0].id, loop => {loop.max_iterations = 2})");
   assert.equal(ui.run("multipleLoops()[0].max_iterations"), 10);
   ui.run("finish()"); await promise;
-  assert.equal(ui.run("conditionalUI.checking"), false);
-  assert.equal(ui.document.querySelector("#conditional-run").disabled, false);
-});
-
-test("plan API failure unlocks cards and does not permit run", async () => {
-  const ui = controller();
-  ui.run("fetch = async () => ({ok: false, text: async () => JSON.stringify({detail: 'bad plan'})})");
-  await ui.run("checkConditionalPlan()");
-  assert.equal(ui.run("conditionalUI.checking"), false);
-  assert.equal(ui.run("conditionalUI.error"), "bad plan");
+  assert.equal(ui.run("batch.starting || batch.requesting"), false);
   assert.equal(ui.document.querySelector("#conditional-add").disabled, false);
-  assert.equal(ui.document.querySelector("#conditional-run").disabled, true);
 });
 
-test("stale plan response is discarded after workflow replacement", async () => {
+test("server validation failure never falls back to ordinary save and requires status confirmation", async () => {
   const ui = controller();
-  ui.run("fetch = () => new Promise(resolve => {globalThis.finish = () => resolve({ok: true, text: async () => JSON.stringify({target_id: 'save', loops: []})});})");
-  const pending = ui.run("checkConditionalPlan()");
-  ui.run("state.workflow = structuredClone(state.workflow); multipleLoops()[0].max_iterations = 3; restoreLoop({conditionalTargetId: 'save'}); finish()");
-  await pending;
-  assert.equal(ui.run("conditionalUI.plan"), null);
-  assert.equal(ui.document.querySelector("#conditional-run").disabled, true);
+  ui.run("fetch = async (url, options) => {requests.push({url, body: JSON.parse(options.body)}); return {ok: false, text: async () => JSON.stringify({detail: 'bad plan'})};}");
+  await ui.run("previewNode('save')");
+  assert.match(ui.run("batch.error"), /bad plan/);
+  assert.equal(ui.run("batch.uncertain"), true);
+  await ui.run("previewNode('save')");
+  assert.deepEqual(plain(ui.run("requests.map(r => r.url)")), ["/api/conditional"]);
+  assert.equal(ui.document.querySelector("#conditional-add").disabled, true);
+  ui.run("reply = {job: null}; fetch = async () => ({ok: true, text: async () => JSON.stringify(reply)})");
+  await ui.run("batchRequest('refresh')");
+  assert.equal(ui.run("batch.uncertain"), false);
+  assert.equal(ui.document.querySelector("#conditional-add").disabled, false);
 });
 
 test("single-image start shares batch state, poll, cancel and latest endpoints", async () => {
-  const ui = controller(); checked(ui); ui.run("reply.status = 'running'");
+  const ui = controller(); ui.run("reply.status = 'running'");
   await ui.run("batchRequest('start-condition', 'save')");
   assert.equal(ui.run("requests[0].url"), "/api/conditional");
   assert.equal(ui.run("requests[0].body.node_id"), "save");
@@ -321,7 +338,7 @@ test("single-image start shares batch state, poll, cancel and latest endpoints",
 });
 
 test("submission uncertainty locks both starts until latest confirms idle", async () => {
-  const ui = controller(); folder(ui); checked(ui);
+  const ui = controller(); folder(ui);
   ui.run("fetch = async () => { throw new Error('lost response'); }");
   await ui.run("batchRequest('start-condition', 'save')");
   assert.equal(ui.run("batch.uncertain"), true);
@@ -333,7 +350,7 @@ test("submission uncertainty locks both starts until latest confirms idle", asyn
 });
 
 test("submission locks synchronously without discarding successful previews", async () => {
-  const ui = controller(); checked(ui);
+  const ui = controller();
   ui.run("state.nodeResults.gen = {image: {kind: 'image', image: 'retained'}}; fetch = () => new Promise(resolve => {globalThis.finish = () => resolve({ok: true, text: async () => JSON.stringify(reply)});})");
   const pending = ui.run("batchRequest('start-condition', 'save')");
   assert.equal(ui.run("batch.starting && batch.requesting"), true);
@@ -343,23 +360,23 @@ test("submission locks synchronously without discarding successful previews", as
   assert.equal(ui.run("batch.starting || batch.requesting"), false);
 });
 
-test("stale keys, wrong targets, active previews and job checks cannot start", async () => {
-  for (const setup of ["conditionalUI.planKey = 'stale'", "conditionalUI.targetId = 'save2'", "loopUI.busy = true", "loopUI.checking = true", "conditionalUI.checking = true", "batch.job = {status: 'cancelling'}"]) {
-    const ui = controller(); checked(ui); ui.run(setup);
+test("invalid acceptance, active previews and job checks cannot start", async () => {
+  for (const setup of ["multipleLoops()[0].conditions = []", "loopUI.busy = true", "loopUI.checking = true", "conditionalUI.checking = true", "batch.job = {status: 'cancelling'}"]) {
+    const ui = controller(); ui.run(setup);
     await ui.run("batchRequest('start-condition', 'save')"); assert.equal(ui.run("requests.length"), 0, setup);
   }
 });
 
-test("ordinary SaveImages preview is blocked while non-save preview remains one-shot", async () => {
-  const ui = controller(); await ui.run("previewNode('save')");
+test("ordinary save cannot bypass malformed acceptance; valid save automatically uses conditional endpoint", async () => {
+  const ui = controller();
+  ui.run("multipleLoops()[0].conditions = []");
+  await ui.run("previewNode('save')");
   assert.equal(ui.run("requests.length"), 0);
-  assert.equal(ui.document.querySelector("#conditional-panel").open, true);
-  assert.match(ui.document.querySelector("#status").textContent, /普通保存已阻止/);
-  canvasCard(ui, "score");
-  ui.run("reply = {outputs: {value: {kind: 'text', value: 0.2}}, executed_nodes: ['score']}");
-  await ui.run("previewNode('score')");
-  assert.deepEqual(plain(ui.run("requests.map(r => r.url)")), ["/api/node/preview"]);
-  assert.equal(ui.run("state.nodeResults.score.value.value"), 0.2);
+  ui.run("multipleLoops()[0].conditions = [{node: 'score', output: 'value', operator: '<=', value: 0.3}]; conditionalUI.targetId = 'save2'");
+  await ui.run("previewNode('save')");
+  assert.equal(ui.run("conditionalUI.targetId"), "save");
+  assert.deepEqual(plain(ui.run("requests.map(r => r.url)")), ["/api/conditional"]);
+  assert.equal(ui.run("requests[0].body.node_id"), "save");
 });
 
 test("folder batch carries loops metadata and conditional trial uses async job lock", async () => {
@@ -387,20 +404,20 @@ test("folder checks lock cards and release on API errors", async () => {
 });
 
 test("poll rendering preserves focused card controls and uncommitted values", () => {
-  const ui = controller(); checked(ui); ui.run("renderBatch()");
+  const ui = controller(); ui.run("renderBatch()");
   const root = ui.document.querySelector("#multiple-loops");
-  const input = walk(root).find(e => e.tagName === "input" && e.type === "number");
+  const input = walk(root).find(e => e.attributes["aria-label"] === "条件 1 比较值");
   input.value = "123"; input.focus(); const original = [...root.children];
   ui.run("batch.job = {id: 'j', status: 'completed', total: 1, processed: 1, succeeded: 1, failed: 0}; renderBatch(); renderBatch()");
   assert.equal(ui.document.activeElement, input); assert.equal(input.value, "123");
   assert.deepEqual(root.children, original);
 });
 
-test("cancel helper, panel and Escape preserve configuration and checked plan", () => {
+test("cancel helper, panel and Escape preserve configuration and preview session", () => {
   for (const method of ["helper", "button", "Escape"]) {
-    const ui = controller(); checked(ui);
+    const ui = controller();
     ui.run("state.previewSession = 'existing-session'; beginMultiplePick(multipleLoops()[0].id, 'condition', 0)");
-    const before = ui.run("JSON.stringify([state.workflow, conditionalUI.plan, conditionalUI.planKey, state.previewRevision, state.previewSession])");
+    const before = ui.run("JSON.stringify([state.workflow, state.previewRevision, state.previewSession])");
     if (method === "helper") ui.run("cancelConditionalPick()");
     if (method === "button") conditionalButton(ui, "取消点选 (Esc)").click();
     if (method === "Escape") {
@@ -408,15 +425,15 @@ test("cancel helper, panel and Escape preserve configuration and checked plan", 
       assert.equal(event.defaultPrevented, true);
     }
     assert.equal(ui.run("conditionalUI.picking"), null);
-    assert.equal(ui.run("JSON.stringify([state.workflow, conditionalUI.plan, conditionalUI.planKey, state.previewRevision, state.previewSession])"), before);
+    assert.equal(ui.run("JSON.stringify([state.workflow, state.previewRevision, state.previewSession])"), before);
   }
 });
 
-test("actual port edit invalidates both plans but preserves history image identity and session", () => {
-  const ui = controller(); checked(ui);
+test("actual port edit invalidates folder plan but preserves history image identity and session", () => {
+  const ui = controller();
   ui.run("state.previewSession = 'reuse'; state.nodeResults.gen = {image: {kind: 'image', image: 'retained'}}; globalThis.retained = state.nodeResults.gen.image; state.previewHidden.gen = true; loopUI.plan = {}; loopUI.planKey = 'old'");
   const revision = ui.run("state.previewRevision");
-  conditionalButton(ui, "重选条件 1").click(); clickPort(ui, "score", "count");
+  conditionalButton(ui, "重选条件").click(); clickPort(ui, "score", "count");
   assert.equal(ui.run("conditionalUI.plan"), null); assert.equal(ui.run("loopUI.plan"), null);
   assert.equal(ui.run("conditionalUI.planKey"), null); assert.equal(ui.run("loopUI.planKey"), null);
   assert.equal(ui.run("state.nodeResults.gen.image === retained"), true);
@@ -452,4 +469,64 @@ test("download/import preserves loops-only schema and explicit shared target", a
   assert.deepEqual(plain(ui.run("state.workflow.conditional_loop")), before);
   assert.equal(ui.run("conditionalUI.targetId"), "save");
   assert.equal(ui.run("conditionalUI.picking"), null);
+});
+
+for (const nodeId of ["gen", "score", "bridge", "downstream"]) {
+  for (const visualize of [true, false]) {
+    test(`actual previewNode(${nodeId}) uses an async conditional job with visualize=${visualize}`, async () => {
+      const ui = controller();
+      ui.run(`
+        state.workflow.nodes.bridge = {class_type: 'Generate', inputs: {image: link('gen', 'image'), seed: 0}};
+        state.workflow.nodes.downstream = {class_type: 'Score', inputs: {image: link('bridge', 'image')}};
+        ${visualize ? "" : "state.visualize = false;"}
+        state.config = {demo_limit: 0}; document.querySelector('#config-demo_limit').value = '7';
+        document.querySelector('#target-path').value = 'input.png';
+        document.querySelector('#mask-path').value = 'mask.png';
+        document.querySelector('#object-name').value = '对象';
+        document.querySelector('#batch-continue-on-error').checked = true;
+        state.previewSession = 'must-not-reuse-unaccepted-cache'; reply.status = 'running';
+      `);
+      const before = plain(ui.run("state.workflow"));
+      await ui.run(`previewNode('${nodeId}')`);
+      assert.deepEqual(plain(ui.run("requests")), [{url: "/api/node/preview", body: {
+        workflow: before, visualize, node_id: nodeId, continue_on_error: true,
+        config: {demo_limit: 7}, record: {target_path: "input.png", mask_path: "mask.png", object_name: "对象"},
+      }}]);
+      assert.deepEqual(plain(ui.run("state.workflow")), before);
+      assert.equal(ui.run("batchActive()"), true);
+      assert.equal(ui.run("batch.uncertain"), false);
+      assert.equal(ui.run("state.activeJobId"), "job-1");
+      assert.equal(ui.run("state.activeJobRevision === state.previewRevision"), true);
+      assert.equal(ui.run("state.selected"), nodeId);
+      assert.equal(ui.run("state.previewSession"), null);
+    });
+  }
+}
+
+test("an unrelated ordinary node remains synchronous and carries the existing preview session", async () => {
+  const ui = controller();
+  const card = canvasCard(ui, "alt");
+  ui.run(`state.previewSession = 'reuse-fixed-input';
+    fetch = (url, options) => {
+      requests.push({url, body: JSON.parse(options.body)});
+      return new Promise(resolve => {globalThis.finish = () => resolve({ok: true, text: async () => JSON.stringify({
+        outputs: {image: {kind: 'image', image: 'data:image/png;base64,unrelated'}},
+        executed_nodes: ['fixed', 'alt'], reused_nodes: [], preview_session: 'still-synchronous'
+      })});});
+    };`);
+  const before = plain(ui.run("state.workflow"));
+  const pending = ui.run("previewNode('alt')");
+  assert.equal(ui.run("loopUI.busy"), true);
+  assert.equal(ui.run("batch.starting || batch.requesting"), false);
+  assert.equal(card.querySelector(".node-preview-button").disabled, true);
+  assert.equal(ui.run("requests[0].url"), "/api/node/preview");
+  assert.deepEqual(plain(ui.run("requests[0].body")), {
+    workflow: before, visualize: true, node_id: 'alt', preview_session: 'reuse-fixed-input',
+    config: {}, record: {target_path: '', mask_path: '', object_name: ''},
+  });
+  ui.run("finish()"); await pending;
+  assert.equal(ui.run("loopUI.busy"), false);
+  assert.equal(ui.run("batch.job"), null);
+  assert.equal(ui.run("state.previewSession"), "still-synchronous");
+  assert.equal(ui.run("state.nodeResults.alt.image.image"), "data:image/png;base64,unrelated");
 });

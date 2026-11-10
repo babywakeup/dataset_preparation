@@ -24,7 +24,8 @@ from object_inpainting.workflow_migrations import migrate_color_swatch_outputs
 from PIL import Image, ImageOps
 
 from .batch import BatchJobs
-from .conditional_loop import build_conditional_plan, condition_nodes, loop_settings
+from .conditional_loop import (MultiConditionalPlan, build_conditional_plan, condition_nodes,
+                               loop_settings, preview_settings, required_preview_settings)
 from .node_help import CONFIG_HELP, NODE_HELP
 from .port_names import port_labels
 from .preview_cache import PreviewCache
@@ -349,13 +350,30 @@ def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str
 @app.post("/api/node/preview")
 def preview_node(payload: dict):
     try:
+        visualize = visualization_enabled(payload)
+        definition = payload.get("workflow")
+        if isinstance(definition, dict) and "workflow" in definition:
+            definition = definition["workflow"]
+        settings = loop_settings(definition)
+        if settings is not None:
+            if "loops" not in settings:
+                raise ValueError("普通节点条件预览需要 loops 配置；请先迁移旧 flat 条件配置，不能绕过验收。")
+            selected = required_preview_settings(definition, settings, node_id=payload["node_id"])
+            if selected is not None:
+                graph = node_preview_graph(definition, payload["node_id"], condition_nodes(selected))
+                plan = MultiConditionalPlan(graph, None, selected, definition,
+                                            preview_node_id=payload["node_id"])
+                context = node_preview_context(graph, payload)
+                return BATCH_JOBS.start(graph, context, None, None, [None], 0, False,
+                                       conditional=plan, preview_serializer=serialize_node_output,
+                                       visualize=visualize)
         graph = node_preview_graph(payload.get("workflow"), payload["node_id"])
         results, session, executed, reused = PREVIEW_CACHE.run(
             graph, payload, lambda: node_preview_context(graph, payload),
         )
         return {
             "node_id": payload["node_id"],
-            "outputs": {name: serialize_node_output(value) for name, value in results.items()},
+            "outputs": {name: serialize_node_output(value) for name, value in results.items()} if visualize else {},
             "executed_nodes": executed,
             "reused_nodes": reused,
             "preview_session": session,
@@ -367,6 +385,7 @@ def preview_node(payload: dict):
 @app.post("/api/node/save-images")
 def save_node_images(payload: dict):
     try:
+        visualize = visualization_enabled(payload)
         if loop_settings(payload.get("workflow")) is not None:
             raise ValueError("已启用条件循环，请使用条件运行；普通保存不能绕过达标判断。")
         node_id = payload["node_id"]
@@ -379,13 +398,20 @@ def save_node_images(payload: dict):
         )
         return {
             "node_id": node_id,
-            "outputs": {name: serialize_node_output(value) for name, value in results.items()},
+            "outputs": {name: serialize_node_output(value) for name, value in results.items()} if visualize else {},
             "executed_nodes": executed,
             "reused_nodes": reused,
             "preview_session": session,
         }
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def visualization_enabled(payload):
+    value = payload.get("visualize", True)
+    if type(value) is not bool:
+        raise ValueError("visualize 必须是布尔值。")
+    return value
 
 
 def prepare_conditional(payload: dict):
@@ -404,6 +430,34 @@ def prepare_conditional(payload: dict):
     return graph, plan
 
 
+def prepare_conditional_preview(payload: dict):
+    """Prepare a computation-only task without a save node or preview cache."""
+    definition = payload.get("workflow")
+    if isinstance(definition, dict) and "workflow" in definition:
+        definition = definition["workflow"]
+    settings = loop_settings(definition)
+    if settings is None or "loops" not in settings:
+        raise ValueError("循环预览需要 loops 配置和 loop_id。")
+    loop_id = payload.get("loop_id")
+    settings = preview_settings(definition, settings, loop_id)
+    roots = condition_nodes(settings)
+    graph = node_preview_graph(definition, roots[0], roots[1:])
+    plan = MultiConditionalPlan(graph, None, settings, definition, preview_loop_id=loop_id)
+    return plan.graph, plan
+
+
+@app.post("/api/conditional/preview")
+def preview_conditional(payload: dict):
+    try:
+        graph, plan = prepare_conditional_preview(payload)
+        context = node_preview_context(graph, payload)
+        return BATCH_JOBS.start(graph, context, None, None, [None], 0, False,
+                                conditional=plan, preview_serializer=serialize_node_output,
+                                visualize=visualization_enabled(payload))
+    except (KeyError, OSError, ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @app.post("/api/conditional/plan")
 def plan_conditional(payload: dict):
     try:
@@ -418,7 +472,8 @@ def start_conditional(payload: dict):
     try:
         graph, plan = prepare_conditional(payload)
         context = node_preview_context(graph, payload, allowed_save_node=plan.target_id)
-        return BATCH_JOBS.start(graph, context, None, plan.target_id, [None], 0, False, conditional=plan)
+        return BATCH_JOBS.start(graph, context, None, plan.target_id, [None], 0, False, conditional=plan,
+                       preview_serializer=serialize_node_output, visualize=visualization_enabled(payload))
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -485,20 +540,23 @@ def plan_batch(payload: dict):
 def preview_batch(payload: dict):
     graph, source_id, target_id, paths, start_index, _, conditional = prepare_batch(payload)
     try:
+        visualize = visualization_enabled(payload)
         context = node_preview_context(graph, payload, allowed_save_node=target_id)
         if conditional is not None:
             # Use the same task lock as normal batch / single-image retries.
             # Trial is deliberately asynchronous too: no duplicate long jobs
             # can slip through while a synchronous HTTP request is pending.
             job = BATCH_JOBS.start(graph, context, source_id, target_id, paths[:start_index + 1],
-                                   start_index, False, conditional=conditional)
+                                   start_index, False, conditional=conditional,
+                                   preview_serializer=serialize_node_output, visualize=visualize)
             return job
         execution = graph.start(context, allow_side_effects=True)
         execution.cache[source_id] = folder_image(paths[start_index], start_index, len(paths))
         results = execution.get_node(target_id)
         return {
             "node_id": target_id,
-            "outputs": {name: serialize_node_output(value) for name, value in results.items()},
+            "outputs": {name: serialize_node_output(value) for name, value in results.items()}
+                       if visualize else {},
             "executed_nodes": list(execution.cache),
         }
     except (KeyError, OSError, ValueError, TypeError) as error:
@@ -511,7 +569,8 @@ def start_batch(payload: dict):
     try:
         context = node_preview_context(graph, payload, allowed_save_node=target_id)
         return BATCH_JOBS.start(graph, context, source_id, target_id, paths, start_index, continue_on_error,
-                       conditional=conditional)
+                       conditional=conditional, preview_serializer=serialize_node_output,
+                       visualize=visualization_enabled(payload))
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

@@ -5,7 +5,7 @@
 - [port_types.py](../object_inpainting/port_types.py)：`PortType`、`ImageRole` 公共类别，以及图像、路径、坐标框的 Python 类型。
 - [node_contracts.py](../object_inpainting/node_contracts.py)：每个节点的 `XXXInputs` / `XXXOutputs` 类。类中的字段就是节点入口 / 出口，字段旁的注解就是对应类型。
 - [base.py](../object_inpainting/nodes/base.py)：节点声明 `INPUT_SCHEMA` / `OUTPUT_SCHEMA`；基类自动生成图执行器使用的 `INPUT_TYPES` / `OUTPUT_TYPES`，不再维护两份手写端口表。
-- 每个节点实现中的 `execute()`：所有 28 个已注册节点的参数和返回值均有显式注解。Studio 卡片及右侧说明同时显示入口类、出口类名称。
+- 每个节点实现中的 `execute()`：所有 30 个已注册节点的参数和返回值均有显式注解。Studio 卡片及右侧说明同时显示入口类、出口类名称。
 
 ## 公共数据类型
 
@@ -94,6 +94,8 @@ class GrayMaskNode(Node):
 | `SelectColorRegionNode` | `SelectColorRegionInputs` | `SelectedRegionOutputs` |
 | `ColorRegionSwatchesNode` | `ColorRegionSwatchesInputs` | `ColorSwatchOutputs` |
 | `ColorSimilarityNode` | `ColorSimilarityInputs` | `ColorSimilarityOutputs` |
+| `LoopDemoImageNode` | `LoopDemoImageInputs` | `LoopDemoImageOutputs` |
+| `LoopDemoScoreNode` | `LoopDemoScoreInputs` | `LoopDemoScoreOutputs` |
 
 分色已有的两个输出类仍定义在 [color_regions.py](../object_inpainting/color_regions.py)，通过合同模块统一导出；旧的色块 / 换色输出类导入路径也继续指向同一份类，避免重复定义。
 

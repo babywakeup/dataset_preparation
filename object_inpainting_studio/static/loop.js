@@ -17,7 +17,7 @@ function restoreLoop(settings = {}) {
     loopUI.enabled = settings.enabled === true;
     if (state.workflow.nodes[settings.targetId]?.class_type === "SaveImagesNode" || (conditionalEnabled() && typeof settings.targetId === "string")) loopUI.targetId = settings.targetId;
   }
-  if (typeof resetMultipleLoops === "function") resetMultipleLoops();
+  resetMultipleLoops();
 }
 
 function upstreamNodes(targetId) {
@@ -32,6 +32,21 @@ function upstreamNodes(targetId) {
   return order;
 }
 
+function batchUpstreamNodes(targetId) {
+  if (!state.workflow.nodes[targetId]) return [];
+  // Batch execution includes condition/end branches, even when their outputs
+  // are not wired into the save node. Match the server's condition_nodes roots.
+  const settings = state.workflow.conditional_loop;
+  const loops = Array.isArray(settings?.loops) ? settings.loops : settings ? [settings] : [];
+  const roots = [];
+  loops.forEach(item => {
+    if (Array.isArray(item?.conditions)) roots.push(...item.conditions.map(condition => condition?.node));
+    if (Array.isArray(settings?.loops) && Array.isArray(item?.end_nodes)) roots.push(...item.end_nodes);
+  });
+  roots.push(targetId);
+  return [...new Set(roots.flatMap(id => upstreamNodes(id)))];
+}
+
 function loopScope() {
   const nodes = state.workflow.nodes;
   if (nodes[loopUI.sourceId]?.class_type !== "FolderImagesNode") {
@@ -39,9 +54,9 @@ function loopScope() {
     loopUI.enabled = false;
   }
   const sourceId = loopUI.sourceId;
-  const targets = Object.keys(nodes).filter(id => nodes[id].class_type === "SaveImagesNode" && upstreamNodes(id).includes(sourceId));
+  const targets = Object.keys(nodes).filter(id => nodes[id].class_type === "SaveImagesNode" && batchUpstreamNodes(id).includes(sourceId));
   if (!targets.includes(loopUI.targetId) && !(conditionalEnabled() && loopUI.targetId)) loopUI.targetId = targets.length === 1 ? targets[0] : null;
-  const order = upstreamNodes(loopUI.targetId);
+  const order = batchUpstreamNodes(loopUI.targetId);
   const repeated = new Set(sourceId ? [sourceId] : []);
   order.forEach(id => {
     if (Object.values(nodes[id].inputs).some(value => isLink(value) && repeated.has(value.node))) repeated.add(id);
@@ -158,15 +173,10 @@ function renderLoop() {
 
 function conditionalValidation(targetId) {
   if (!conditionalEnabled()) return "条件重试未启用。";
-  if (typeof normalizeImportedConditional === "function") normalizeImportedConditional();
-  return typeof validateMultiple === "function" ? validateMultiple(targetId === undefined ? conditionalUI.targetId : targetId) : "条件循环模块未加载。";
+  normalizeImportedConditional();
+  return validateMultiple(targetId === undefined ? conditionalUI.targetId : targetId);
 }
 
-function conditionalPayload(nodeId) {
-  if (typeof normalizeImportedConditional === "function") normalizeImportedConditional();
-  return { ...workflowPayload(), node_id: nodeId === undefined ? conditionalUI.targetId : nodeId, record: recordPayload(), config: currentConfig() };
-}
-function conditionalPlanKey() { return JSON.stringify(conditionalPayload()); }
 function conditionalChanged() {
   conditionalUI.plan = null; conditionalUI.planKey = null; conditionalUI.error = "";
   invalidateResults(); // Keep successful previews and the preview session.
@@ -184,9 +194,7 @@ function cancelConditionalPick() {
 }
 function consumeConditionalPick(id, output = null) {
   if (!conditionalUI.picking) return false;
-  if (typeof consumeMultiplePick === "function") return consumeMultiplePick(id, output);
-  conditionalUI.picking = null;
-  return true;
+  return consumeMultiplePick(id, output);
 }
 function conditionalAction(caption, action) {
   const button = Object.assign(document.createElement("button"), { textContent: caption, type: "button" });
@@ -199,16 +207,11 @@ function conditionalSelect(options, value, label) {
   select.value = value ?? ""; return select;
 }
 function renderConditional() {
-  if (typeof renderMultipleEntry === "function") {
-    renderMultipleEntry();
-    if (conditionalEnabled()) { renderMulti(); return; }
-  }
+  renderMultipleEntry();
+  if (conditionalEnabled()) { renderMulti(); return; }
   conditionalUI.picking = null; conditionalUI.plan = null; conditionalUI.planKey = null; conditionalUI.error = "";
   document.querySelector("#conditional-badge").textContent = "";
   document.querySelector("#conditional-error").textContent = "";
-  document.querySelector("#conditional-plan").textContent = "";
-  document.querySelector("#conditional-check").disabled = true;
-  document.querySelector("#conditional-run").disabled = true;
   document.querySelectorAll(".node").forEach(card => {
     ["conditional-member", "conditional-boundary", "conditional-pickable"].forEach(name => card.classList.remove(name));
     const badge = card.querySelector(".conditional-role"); if (badge) badge.textContent = "";
@@ -217,21 +220,6 @@ function renderConditional() {
     port.classList.remove("conditional-pick-port"); port.classList.remove("conditional-selected-port");
   });
 }
-async function checkConditionalPlan() {
-  if (nodeDeletionDisabled() || conditionalValidation()) return;
-  const key = conditionalPlanKey();
-  conditionalUI.checking = true; conditionalUI.error = ""; conditionalUI.plan = null; conditionalUI.planKey = key;
-  renderBatch();
-  try {
-    const plan = await api("/api/conditional/plan", { method: "POST", body: key });
-    if (key === conditionalPlanKey()) conditionalUI.plan = plan;
-  } catch (error) {
-    if (key === conditionalPlanKey()) conditionalUI.error = error.message;
-  } finally { conditionalUI.checking = false; renderBatch(); }
-}
-document.querySelector("#conditional-check").onclick = checkConditionalPlan;
-document.querySelector("#conditional-run").onclick = () => batchRequest("start-condition", conditionalUI.targetId);
-
 function renderLoopRegion(scope = loopScope()) {
   const region = document.querySelector("#loop-region");
   const cards = [...document.querySelectorAll(".node")].filter(card => scope.repeated.has(card.dataset.nodeId));

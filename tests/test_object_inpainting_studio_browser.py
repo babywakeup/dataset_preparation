@@ -1,16 +1,19 @@
+import base64
+import io
 import json
 import os
 import re
 import socket
 import unittest
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_object_inpainting_dataset as dataset_tests
 import uvicorn
 from object_inpainting.nodes import NODE_CLASS_MAPPINGS, GrayMaskNode
+from object_inpainting.nodes.loop_demo import LoopDemoImageNode
 from object_inpainting_studio.server import app
 from PIL import Image
 from playwright.sync_api import expect, sync_playwright
@@ -53,7 +56,166 @@ class StudioBrowserTests(unittest.TestCase):
         self.page.goto(self.base_url + "/")
         expect(self.page.locator("#status")).to_contain_text("Ready.")
 
-    def test_conditional_retry_ui_checks_plan_saves_only_accepted_attempt(self) -> None:
+    def test_cpu_demo_previews_each_loop_without_save_and_keeps_failed_last_image(self) -> None:
+        self.page.evaluate("""() => {
+            state.workflow = {nodes: {}, outputs: {}};
+            state.layout = {}; restoreLoop(); render();
+        }""")
+        self.page.locator("#conditional-panel > summary").click()
+        self.page.locator("#conditional-demo").click()
+        cards = self.page.locator(".multiple-loop-card")
+        expect(cards).to_have_count(2)
+        ids = self.page.evaluate("multipleLoops().map(item => item.id)")
+        first, second = cards.nth(0), cards.nth(1)
+        first.get_by_role("button", name="预览此循环 · 不写盘", exact=True).click()
+        expect(first.locator(".multiple-preview")).to_contain_text("已通过", timeout=15000)
+        expect(first.locator(".multiple-preview img")).to_have_count(1)
+        self.assertEqual(self.page.evaluate("batch.job.required_loop_ids"), [ids[0]])
+        self.assertEqual(self.page.evaluate("batch.job.results[0].iterations"), 3)
+        self.assertEqual(self.page.evaluate("batch.job.iteration_history.map(e => e.scores[0].value)"), [0, 0, 255])
+        self.assertEqual(self.page.evaluate("batch.job.results[0].paths"), {})
+        first_url = first.locator(".multiple-preview img").get_attribute("src")
+        second.get_by_role("button", name="预览此循环 · 不写盘", exact=True).click()
+        expect(second.locator(".multiple-preview")).to_contain_text("已通过", timeout=15000)
+        self.assertEqual(self.page.evaluate("batch.job.required_loop_ids"), [ids[1]])
+        self.assertEqual(self.page.evaluate("batch.job.results[0].iterations"), 2)
+        expect(first.locator(".multiple-preview img")).to_have_attribute("src", first_url)
+        threshold = second.get_by_label("条件 1 比较值", exact=True)
+        threshold.fill("256")
+        threshold.press("Tab")
+        second.get_by_role("button", name="预览此循环 · 不写盘", exact=True).click()
+        expect(second.locator(".multiple-preview")).to_contain_text("未通过 / 已停止", timeout=15000)
+        self.assertEqual(self.page.evaluate("batch.job.status"), "failed")
+        self.assertEqual(self.page.evaluate("batch.job.results[0].iterations"), 3)
+        self.assertEqual(self.page.evaluate("batch.job.iteration_history.map(e => e.scores[0].value)"), [0, 255, 0])
+        self.assertEqual(self.page.evaluate("batch.job.iteration_history.map(e => Object.values(e.seeds)[0])"), [1, 2, 3])
+        preview = self.page.evaluate("Object.values(batch.job.results[0].preview).find(v => v.image).image")
+        with Image.open(io.BytesIO(base64.b64decode(preview["image"].split(",", 1)[1]))) as image:
+            self.assertEqual(image.getpixel((0, 0)), (255, 0, 0))
+        expect(second.locator(".multiple-preview img")).to_have_attribute("src", preview["image"])
+        expect(first.locator(".multiple-preview img")).to_have_attribute("src", first_url)
+        self.assertEqual(self.page.evaluate("Object.values(state.workflow.nodes).filter(n => n.class_type === 'SaveImagesNode').length"), 0)
+        self.assertEqual(self.errors, [])
+
+    def load_cpu_downstream_loop(self) -> None:
+        self.page.evaluate("""() => {
+            state.workflow = {nodes: {
+                generator: {class_type: 'LoopDemoImageNode', inputs: {seed: 0}},
+                score: {class_type: 'LoopDemoScoreNode', inputs: {image: link('generator', 'image')}},
+                next: {class_type: 'LoopDemoScoreNode', inputs: {image: link('generator', 'image')}}
+            }, outputs: {}, conditional_loop: {loops: [{
+                id: 'rgb', name: 'RGB 验收', start_nodes: ['generator'], end_nodes: ['score'],
+                seed_nodes: ['generator'], conditions: [{node: 'score', output: 'score', operator: '>=', value: 255}],
+                mode: 'all', max_iterations: 3, timeout_seconds: 0, on_exhausted: 'fail'
+            }]}};
+            state.layout = {generator: {x: 30, y: 40}, score: {x: 390, y: 40}, next: {x: 750, y: 40}};
+            restoreLoop(); render();
+        }""")
+
+    def assert_cpu_loop_image(self, color) -> None:
+        source = self.page.evaluate("state.nodeResults.generator.image.image")
+        with Image.open(io.BytesIO(base64.b64decode(source.split(',', 1)[1]))) as image:
+            self.assertEqual((image.mode, image.size), ('RGB', (32, 32)))
+            self.assertEqual(image.getcolors(), [(1024, color)])
+        for selector in ('.node[data-node-id="generator"] .node-output-view img',
+                         '#run-visualization img', '.multiple-preview img'):
+            expect(self.page.locator(selector)).to_have_count(1)
+            expect(self.page.locator(selector)).to_have_attribute("src", source)
+            expect(self.page.locator(selector)).to_be_visible()
+
+    def test_cpu_downstream_preview_runs_required_loop_and_updates_real_images(self) -> None:
+        if os.environ.get("STUDIO_TEST_URL"):
+            self.skipTest("execution synchronization requires the in-process server")
+        self.load_cpu_downstream_loop()
+        expect(self.page.locator("#visualize")).to_have_value("yes")
+        release_green, release_blue = Event(), Event()
+        calls = []
+        original_execute = LoopDemoImageNode.execute
+
+        def execute(node, seed=0):
+            calls.append(seed)
+            if seed == 1:
+                self.assertTrue(release_green.wait(30), "browser did not release the green round")
+            elif seed == 2:
+                self.assertTrue(release_blue.wait(30), "browser did not release the blue round")
+            return original_execute(node, seed)
+
+        with patch.object(LoopDemoImageNode, "execute", new=execute):
+            try:
+                with self.page.expect_response(lambda response: response.url.endswith("/api/node/preview") and response.request.method == "POST") as submitted:
+                    self.page.locator('.node[data-node-id="next"] .node-preview-button').click()
+                self.assertTrue(submitted.value.ok)
+                initial = submitted.value.json()
+                self.assertIn("id", initial)
+                self.assertNotIn("outputs", initial)  # Standard endpoint returned an asynchronous job.
+                self.assertEqual(initial["preview_node_id"], "next")
+                self.assertEqual(initial["required_loop_ids"], ["rgb"])
+                self.page.wait_for_function("state.nodeResults.generator?.value?.value === 0")
+                self.assertEqual(self.page.evaluate("batch.job.status"), "running")
+                self.assert_cpu_loop_image((255, 0, 0))
+                release_green.set()
+                self.page.wait_for_function("state.nodeResults.generator?.value?.value === 1")
+                self.assert_cpu_loop_image((0, 255, 0))
+                release_blue.set()
+                expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
+                self.assert_cpu_loop_image((0, 0, 255))
+            finally:
+                release_green.set()
+                release_blue.set()
+                self.page.wait_for_function("batch.job && !['running', 'cancelling'].includes(batch.job.status)", timeout=15000)
+        self.assertEqual(calls, [0, 1, 2])
+        self.assertEqual(self.page.evaluate("batch.job.required_loop_ids"), ["rgb"])
+        self.assertTrue(self.page.evaluate("batch.job.visualize"))
+        self.assertEqual(self.page.evaluate("batch.job.results[0].iterations"), 3)
+        self.assertTrue(self.page.evaluate("batch.job.results[0].accepted"))
+        self.assertEqual(self.page.evaluate("batch.job.iteration_history.map(e => e.scores[0].value)"), [0, 0, 255])
+        self.assertEqual(self.page.evaluate("state.nodeResults.next.score.value"), 255)
+        self.assertEqual(self.page.evaluate("batch.job.results[0].preview.next.score.value"), 255)
+        self.assertEqual(self.page.evaluate("batch.job.results[0].paths"), {})
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.generator.inputs.seed"), 0)
+        self.assertEqual(self.errors, [])
+
+    def test_cpu_downstream_visualize_no_skips_serialization_and_yes_restores_output(self) -> None:
+        if os.environ.get("STUDIO_TEST_URL"):
+            self.skipTest("serialization observation requires the in-process server")
+        self.load_cpu_downstream_loop()
+        self.page.locator("#visualize").select_option("no")
+        with patch("object_inpainting_studio.server.serialize_node_output", side_effect=AssertionError("visualize=no must not serialize outputs")) as serializer:
+            with self.page.expect_response(lambda response: response.url.endswith("/api/node/preview") and response.request.method == "POST") as submitted:
+                self.page.locator('.node[data-node-id="next"] .node-preview-button').click()
+            self.assertTrue(submitted.value.ok)
+            self.assertFalse(submitted.value.request.post_data_json["visualize"])
+            expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
+            serializer.assert_not_called()
+        job = self.page.evaluate("batch.job")
+        self.assertFalse(job["visualize"])
+        self.assertEqual(job["required_loop_ids"], ["rgb"])
+        self.assertEqual(job["loop_previews"], {})
+        self.assertEqual(job["visualization_revision"], 0)
+        self.assertTrue(job["results"][0]["accepted"])
+        self.assertEqual(job["results"][0]["iterations"], 3)
+        self.assertEqual(job["results"][0]["preview"], {})
+        self.assertEqual([entry["scores"][0]["value"] for entry in job["iteration_history"]], [0, 0, 255])
+        self.assertNotIn("data:image", json.dumps(job))
+        self.assertEqual(self.page.evaluate("state.nodeResults"), {})
+        for selector in ("#run-visualization", ".multiple-preview", "#node-preview"):
+            expect(self.page.locator(selector)).to_be_hidden()
+        expect(self.page.locator("body")).to_have_class(re.compile(r"\bvisualization-off\b"))
+
+        previous_id = job["id"]
+        self.page.locator("#visualize").select_option("yes")
+        expect(self.page.locator("body")).not_to_have_class(re.compile(r"\bvisualization-off\b"))
+        with self.page.expect_response(lambda response: response.url.endswith("/api/node/preview") and response.request.method == "POST") as submitted:
+            self.page.locator('.node[data-node-id="next"] .node-preview-button').click()
+        self.assertTrue(submitted.value.ok)
+        self.assertNotEqual(submitted.value.json()["id"], previous_id)
+        expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
+        self.assertTrue(self.page.evaluate("batch.job.visualize"))
+        self.assertEqual(self.page.evaluate("state.nodeResults.next.score.value"), 255)
+        self.assert_cpu_loop_image((0, 0, 255))
+        self.assertEqual(self.errors, [])
+
+    def test_conditional_retry_save_auto_validates_and_saves_only_accepted_attempt(self) -> None:
         if os.environ.get("STUDIO_TEST_URL"):
             self.skipTest("model substitute requires the in-process server")
         original = self.fixture.root / "conditional-original.png"
@@ -88,11 +250,11 @@ class StudioBrowserTests(unittest.TestCase):
         threshold.fill("1")
         threshold.press("Tab")
         with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", side_effect=generate):
-            self.page.locator("#conditional-check").click()
-            expect(self.page.locator("#conditional-plan")).to_contain_text("循环体：generate、score")
             self.assertEqual(calls, [])
             self.assertFalse(output.exists())
-            self.page.locator("#conditional-run").click()
+            with self.page.expect_response(lambda response: response.url.endswith("/api/conditional") and response.request.method == "POST") as submitted:
+                self.page.locator('.node[data-node-id="save"] .node-preview-button').click()
+            self.assertTrue(submitted.value.ok)
             expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
         self.assertEqual(calls, [0, 1])
         expect(self.page.locator("#batch-counts")).to_contain_text("成功 1")
@@ -152,23 +314,27 @@ class StudioBrowserTests(unittest.TestCase):
         ])
         self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save")
         second = self.page.locator(".multiple-loop-card").nth(1)
-        name = second.get_by_label("循环名称", exact=True)
-        name.fill("第二个换色循环")
+        threshold = second.get_by_label("条件 1 比较值", exact=True)
+        threshold.focus()
         # A progress-only render must not replace the focused input.
         self.page.evaluate("window.focusedLoopInput = document.activeElement; renderBatch()")
         self.assertTrue(self.page.evaluate("window.focusedLoopInput === document.activeElement"))
-        name.press("Tab")
+        threshold.press("Tab")
+        loop_names = self.page.evaluate("multipleLoops().map(item => item.name)")
         expect(self.page.locator("#conditional-error")).to_have_text("")
         with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", side_effect=generate):
-            self.page.locator("#conditional-check").click()
-            expect(self.page.locator("#conditional-plan")).to_contain_text("第二个换色循环")
             self.assertFalse(output.exists())
             self.assertEqual(calls, [])
-            self.page.locator("#conditional-run").click()
+            with self.page.expect_response(lambda response: response.url.endswith("/api/conditional") and response.request.method == "POST") as submitted:
+                # The large wizard graph can place this button behind the sticky toolbar.
+                # Invoke the same handler rather than bypassing it with an API request.
+                self.page.evaluate("previewNode('save')")
+            self.assertTrue(submitted.value.ok)
             expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
         self.assertEqual(calls, [("first", 0), ("first", 1), ("second", 10), ("second", 11)])
         self.assertEqual(self.page.evaluate("batch.job.results[0].loops.map(l => l.iterations)"), [2, 2])
-        expect(self.page.locator("#conditional-attempts")).to_contain_text("第二个换色循环")
+        for name in loop_names:
+            expect(self.page.locator("#conditional-attempts")).to_contain_text(name)
         written = list(output.rglob("*.png"))
         self.assertEqual(len(written), 2)
         for path in written:
@@ -179,10 +345,11 @@ class StudioBrowserTests(unittest.TestCase):
             self.page.locator("#save-workflow").click()
         downloaded_path = self.fixture.root / "multiple-workflow.json"
         downloaded.value.save_as(downloaded_path)
-        exported = json.loads(downloaded_path.read_text())
+        exported = json.loads(downloaded_path.read_text(encoding="utf-8"))
         self.assertEqual(len(exported["workflow"]["conditional_loop"]["loops"]), 2)
         self.page.locator("#load-workflow").set_input_files(downloaded_path)
         expect(self.page.locator(".multiple-loop-card")).to_have_count(2)
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop"), exported["workflow"]["conditional_loop"])
         self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save")
         second_id = exported["workflow"]["conditional_loop"]["loops"][1]["id"]
         self.page.locator(".multiple-loop-card").first.get_by_role("button", name="删除循环", exact=True).click()
@@ -213,7 +380,9 @@ class StudioBrowserTests(unittest.TestCase):
             render();
         }""")
         self.page.locator("#conditional-panel").evaluate("element => element.open = true")
-        expect(self.page.locator("#conditional-legacy, #conditional-enabled, #conditional-fields")).to_have_count(0)
+        expect(self.page.locator("#conditional-legacy, #conditional-enabled, #conditional-fields, #conditional-check, #conditional-run, #conditional-plan, #conditional-target")).to_have_count(0)
+        expect(self.page.get_by_label("循环名称", exact=True)).to_have_count(0)
+        expect(self.page.locator(".multiple-loop-card details")).to_have_count(0)
         expect(self.page.locator(".multiple-loop-card")).to_have_count(1)
         self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].name"), "原有换色循环")
         self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].max_iterations"), 12)
@@ -223,11 +392,7 @@ class StudioBrowserTests(unittest.TestCase):
         def title(node_id: str):
             return self.page.locator(f'.node[data-node-id="{node_id}"] .node-header')
 
-        self.page.get_by_role("button", name="画布选择最终保存目标", exact=True).click()
-        title("generate").click()
-        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
-        expect(self.page.locator("#status")).to_contain_text("SaveImages")
-        title("save_2").click()
+        expect(self.page.get_by_role("button", name="画布选择最终保存目标", exact=True)).to_have_count(0)
         self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
 
         self.page.get_by_role("button", name="重选起点", exact=True).click()
@@ -240,7 +405,7 @@ class StudioBrowserTests(unittest.TestCase):
         threshold.press("Tab")
         bindings = self.page.evaluate("JSON.stringify(Object.fromEntries(Object.entries(state.workflow.nodes).map(([id, n]) => [id, n.inputs])))")
         self.page.evaluate("state.connecting = {node: 'original', output: 'target'}")
-        self.page.get_by_role("button", name="重选条件 1", exact=True).click()
+        self.page.get_by_role("button", name="重选条件", exact=True).click()
         self.page.locator('.port.output[data-node-id="generate_2"][data-port="image"]').click()
         self.assertIsNotNone(self.page.evaluate("conditionalUI.picking"))
         self.page.locator('.port.output[data-node-id="score_2"][data-port="score"]').click()

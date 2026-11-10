@@ -4,6 +4,30 @@
 
 ## 当前交接
 
+- 本轮逐张显示修复（2026-11-10）：用户工作流的评分为保存分支旁路上的条件终点，前端 `loopScope` 原先只遍历保存祖先，错误标注“不执行”。新增 `batchUpstreamNodes`，与服务端 batch 的条件/终点 roots 对齐，覆盖范围、每张执行角色、步骤和文件夹归属；未修改用户 JSON。新增前端回归核对旁路评分、固定输入及取消条件后的范围。五份 JS 套件 141 项通过，`git diff --check` 通过；使用 `code_judge` 与用户 JSON 的相同接线（仅临时替换输入/输出目录、mock 等待）运行 `/api/batch/preview`，确认评分实际调用一次、score=0 满足原配置 <=10。未跑真实浏览器，未重启服务。用户原配置第二个 demo 无 image 输入，保存 32×32 色图；若要保留原图需补 image 连接，蓝色三轮验收需 >=255。下一项任务未指定。
+- 本轮文件夹演示（2026-11-10）：已按用户选定方案给 `LoopDemoImageNode` 增加可选 RGB `image` 输入，复制原图并在左上角覆盖最多 32×32 七色标记；保留原尺寸、其余像素、随机 seed、独立无输入演示与用户 10 秒模拟等待。评分改为仅计算标记蓝通道均值；seed=0 每文件三轮通过。节点帮助、端口说明、使用指南及架构地图已同步。新增真实两文件 API 批处理测试，核对 seed 分别 0/1/2、原图未改、输出文件名和像素、仅保存两张达标图。`code_judge` Python 3.12.13 下加载 `test_loop_demo test_folder_batch_node test_loop_preview test_loop_downstream test_node_contracts test_multiple_conditional_loops`，统一 mock `object_inpainting.nodes.loop_demo.time.sleep` 跳过真实等待，138 项通过；`git diff --check` 通过。未跑完整套件/浏览器，未重启服务；下一步用户重启后端刷新，按使用指南接线测试，下一项开发任务未指定。
+- 本轮修复（2026-11-10）：用户新增七色与 `time.sleep(10)` 后，`from time import time` 导致 AttributeError；已复现并改为 `import time`，保留延迟及七色。使用 `code_judge` Python 3.12.13 直接核对 14 个固定 seed、随机 seed 及 15 次 `sleep(10)` 调用（mock 跳过真实等待），通过；`git diff --check` 通过。未重跑完整测试，旧三色周期测试与用户新增七色已不一致；无阻塞，下一项任务未指定。
+- 本轮补充（2026-11-10）：`LoopDemoImageNode` 支持 `seed=-1` 每次执行随机生成非负 seed，`value` 返回实际 seed；非负 seed 保留红绿蓝周期。修复未定义 `colors`，同步节点帮助与随机/API 回归测试。已用 `code_judge` Python 3.12.13 执行 `python -m unittest test_loop_demo test_loop_preview test_loop_downstream -q`（项目与 tests 在 `PYTHONPATH`），68 项通过，`git diff --check` 通过。未运行完整套件，无阻塞；下一项任务未指定。
+- 更新日期：2026-11-10。
+- 本轮目标：按新用户要求，条件循环只需 start / end / condition；普通节点测试自动验收必要循环，逐轮可视化且不额外生成。
+- 当前界面：保留三项画布点选 / 重选、condition operator / value、预览与删除；已删除循环命名输入、多条件增删 / all-any、高级多起终点、种子 / 次数 / 超时 / 耗尽、公用保存选择和手动检查计划步骤。安全限制及非负起点 INT seed 递增内置，seed=-1 保持随机；旧高级 JSON 参数兼容保留，不因简化界面丢数据，明确重选条件才替换旧多条件列表。
+- 执行与兼容：[previewNode](../object_inpainting_studio/static/app.js) 自动请求 `/api/node/preview`；普通节点依赖循环内部任意输出时（包括测试循环内部节点），后端先验收必要循环，再用达标缓存算目标，无额外生成，无需补 `end_nodes`，失败不跑普通下游。独立循环预览仍走 `/api/conditional/preview`，无需保存节点 / 目录，不写盘，无关半成品不阻塞。前端旧 flat 自动迁为 loops；直接 API 用 flat 测试普通节点返回 422 防绕过，flat 正式保存兼容。保存直接点击相应 SaveImages 节点运行，自动校验，无需手动检查计划。
+- 可视化：`#visualize` yes / no 默认 yes。每轮推送 `loop_previews`（每循环仅一份最新快照）及 `visualization_revision`，更新画布节点 / 循环卡片 / 任务输出区；不保留图片历史，`history` 仍记录各轮评分。no 随请求传 `visualize=false`，后端不序列化图片，不影响计算；中途选 no 立即隐藏，但已在服务器开启的本任务采集不会实时关闭，下次请求才关闭。刷新可恢复最近任务图像快照，不代表当前图配置已验收。
+- 无模型演示：[RGB 周期图及蓝通道评分](../object_inpainting/nodes/loop_demo.py) 可追加两个独立循环，不替换现有流程；seed=0/1、score>=255 分别 3/2 轮通过。失败演示改阈值为 256，显示末轮及未通过，不要求已删除的次数控件。
+- 已实际验证：五个前端文件共 **140 项全部通过**（最终清理后重跑）。已选环境 Python **3.12.13**，循环相关核心 **149 项通过**；扩展至 Studio API、文件夹、缓存、节点错误、图片保存及端口命名后，**222 项通过，无跳过**；具体命令见 [测试指南](../tests/README.md)。inprocess 真实 Chromium **6 项通过**：4 项更新循环测试 + 2 项新增 CPU 下游 / 关闭可视化；Event 阻塞核对真实红 / 绿 / 蓝各轮、下游 255、生成 seed=0/1/2 无重跑，以及阈值 256 的失败末轮。最终清理后另重跑两项关键下游 / 可视化浏览器用例，均通过。
+- 回归修正：旧“不含任何图片”断言改为仅保留当前输入最新快照，逐轮评分历史仍无图片；Windows 临时目录短 / 长路径别名按实际文件身份比较，保留像素、模式及路径安全断言，未改变生产路径规则。关闭可视化任务不接收快照，任务输出明确提示本次未采集，避免旧图冒充当前结果。
+- 验证边界：未运行完整 Python 或浏览器套件，部分其他模块缺 diffusers；未真实 SAM / FLUX 推理，模型质量未测。测试 agent 已通过工具将 scikit-image、Playwright 及 Chromium 装入已选环境，无模型下载。节点内 GPU 调用不能强杀，不支持重叠 / 嵌套 / 反馈。
+- 工作区与服务：保留用户启动脚本及 [模块入口](../object_inpainting_studio/__main__.py) 自有改动，不覆盖；未重启用户业务服务，临时测试服务器已关闭，未修改用户工作流 JSON。
+- 收尾检查：相关 Python / JS / HTML / CSS 和测试文件编辑器诊断无错误；三个前端模块语法及 `git diff --check` 通过，五份文档 **124 个本地链接**有效。核对 30 份改动文本并补齐新增测试末尾换行；用户原启动脚本无末尾换行，未擅自修改。不沿用历史结果或宣称完整测试套件通过。
+- 下一步：下一项业务任务未指定。使用新功能需刷新 Studio；若后端仍为旧进程，需重启服务。
+
+## 前次循环预览（简短历史）
+
+- 2026-11-10：先实现无保存独立循环预览与 CPU 演示；当时前端 124 项通过，Python / 新浏览器未执行。此为前次状态，已由上述本轮 140 / 222 / 6 项验证记录更新。
+- 更早向导曾暴露高级设置、共享保存选择与手动计划检查，普通中间输出曾要求附加 end；均不是当前 UI / 执行规则。
+
+## 前次删除旧循环界面
+
 - 更新日期：2026-11-10。
 - 本轮目标：删除旧版本条件循环设置，只保留新的多循环卡片界面。
 - 已完成：删除旧启用 checkbox / 兼容入口 / flat 配置 DOM、旧事件、旧 picker / renderer 和无用样式；[loop.js](../object_inpainting_studio/static/loop.js) 保留文件夹与共享请求 / 点选逻辑，[multiple_loops.js](../object_inpainting_studio/static/multiple_loops.js) 为唯一条件配置界面。导入 / 恢复 / 直接赋值旧 flat 时自动一次性深拷贝为 loops，保留原参数、仅补缺省，并从旧体的保存来源及条件推导 end；缺失引用和非法值保留提示修正，不猜保存目标，不改原对象 / 用户文件。坏原始配置需明确删除，不静默取消验收。后端 flat API 兼容保留，不暴露旧设置。

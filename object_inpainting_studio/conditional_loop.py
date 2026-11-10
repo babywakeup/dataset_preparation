@@ -1,7 +1,7 @@
 """Bounded Studio retry regions. The surrounding workflow remains a DAG.
 
 No image history is retained: only the current attempt, accepted regions and
-isolated fixed inputs live in memory before the sole save endpoint.
+isolated fixed inputs live in memory before saving or returning a preview.
 """
 
 import math
@@ -174,18 +174,81 @@ def _closure(nodes, edges):
     return seen
 
 
+def preview_settings(definition, settings, loop_id):
+    """Select required regions before validating/building any unrelated graph."""
+    return required_preview_settings(definition, settings, loop_id=loop_id)
+
+
+def required_preview_settings(definition, settings, *, loop_id=None, node_id=None):
+    """Discover region ownership from complete bodies, not just start ancestry.
+
+    Only selected regions are validated. Incomplete unrelated cards may coexist
+    with a runnable slice; an incomplete card whose start is needed must fail.
+    """
+    items = _multiple_settings(settings)
+    if node_id is None and (not isinstance(loop_id, str) or not any(item["id"] == loop_id for item in items)):
+        raise ValueError("未知循环 ID。")
+
+    def ancestry(roots, *, strict=True):
+        needed, pending = set(), list(roots)
+        while pending:
+            node = pending.pop()
+            if not isinstance(node, str) or node in needed:
+                continue
+            needed.add(node)
+            spec = definition["nodes"].get(node)
+            if not isinstance(spec, dict) or not isinstance(spec.get("inputs"), dict):
+                if strict:
+                    raise ValueError(f"Node {node}: missing node or invalid inputs.")
+                continue
+            pending.extend(v["node"] for v in spec["inputs"].values() if is_link(v))
+        return needed
+
+    bodies = {}
+    for item in items:
+        starts = item.get("start_nodes", [])
+        starts = {n for n in starts if isinstance(n, str)} if isinstance(starts, list) else set()
+        ends = item.get("end_nodes", [])
+        ends = ends if isinstance(ends, list) else []
+        conditions = item.get("conditions", [])
+        conditions = conditions if isinstance(conditions, list) else []
+        roots = ends + [c.get("node") for c in conditions if isinstance(c, dict)]
+        relevant = ancestry(roots, strict=False)
+        anchors = {n for n in roots if isinstance(n, str)}
+        body = {n for n in relevant if ancestry([n], strict=False) & starts} if starts else relevant
+        bodies[item["id"]] = starts | anchors | body
+    required = {loop_id} if node_id is None else set()
+    while True:
+        selected = {"loops": [item for item in items if item["id"] in required]}
+        roots = condition_nodes(selected) if required else []
+        needed = ancestry(roots + ([node_id] if node_id is not None else []))
+        upstream = {key for key, body in bodies.items() if body & needed}
+        if upstream <= required:
+            return deepcopy(selected) if required else None
+        required.update(upstream)
+
+
 class MultiConditionalPlan:
     """Disjoint, explicitly bounded retry regions in a single acyclic graph."""
 
-    def __init__(self, graph, target_id, settings, definition):
+    def __init__(self, graph, target_id, settings, definition, *, preview_loop_id=None, preview_node_id=None):
         items = _multiple_settings(settings)
         condition_nodes(settings)
-        self.graph, self.target_id = graph, target_id
+        self.preview_loop_id = preview_loop_id
+        self.preview_node_id = preview_node_id
+        computation_only = preview_loop_id is not None or preview_node_id is not None
         self.settings = deepcopy(settings)
-        if graph.nodes[target_id]["class_type"] != "SaveImagesNode":
+        if computation_only and target_id is not None:
+            raise ValueError("循环预览不能指定保存终点。")
+        if preview_loop_id is not None:
+            by_id = {item["id"]: item for item in items}
+            if not isinstance(preview_loop_id, str) or preview_loop_id not in by_id:
+                raise ValueError("未知循环 ID。")
+        self.graph, self.target_id = graph, target_id
+        if not computation_only and graph.nodes[target_id]["class_type"] != "SaveImagesNode":
             raise ValueError("条件循环必须以 SaveImagesNode 为保存终点。")
-        # Only the selected execution slice may run side effects. Keep using
-        # the complete definition below to detect undeclared body exits.
+        # Only the selected execution slice may run side effects. The full
+        # definition is still used below to protect workflow outputs.
         for node, spec in graph.nodes.items():
             cls = graph.registry.get(spec["class_type"])
             if node != target_id and getattr(cls, "SIDE_EFFECTS", False):
@@ -197,7 +260,7 @@ class MultiConditionalPlan:
             for source in sources:
                 children[source].add(node)
         self.ancestors = {n: _closure([n], parents) for n in graph.nodes}
-        save_ancestors = self.ancestors[target_id]
+        save_ancestors = self.ancestors[target_id] if not computation_only else set(graph.nodes)
         self.loops = []
         self.body = set()
         for item in items:
@@ -230,15 +293,12 @@ class MultiConditionalPlan:
                 raise ValueError("文件夹输入必须位于条件循环外。")
             if any(getattr(graph.registry[graph.nodes[n]["class_type"]], "SIDE_EFFECTS", False) for n in body):
                 raise ValueError("循环体不能包含副作用节点。")
+            # Ordinary consumers may use any accepted intermediate. Execution
+            # retains the whole accepted body; end_nodes are acceptance roots,
+            # not a whitelist of legal outgoing edges.
             exits = set(ends + conditions)
-            for node, spec in definition["nodes"].items():
-                # The sole selected save runs after every region is accepted,
-                # and can consume any retained result without expanding a loop.
-                allowed_exits = body if node == target_id else exits
-                if node not in body and any(is_link(v) and v["node"] in body - allowed_exits
-                                            for v in spec.get("inputs", {}).values()):
-                    raise ValueError(f"循环输出逃逸到节点 {node}，请显式声明 end_nodes。")
-            if any(is_link(v) and v["node"] in body for v in definition.get("outputs", {}).values()):
+            exposed = body if not computation_only else body - exits
+            if any(is_link(v) and v["node"] in exposed for v in definition.get("outputs", {}).values()):
                 raise ValueError("循环体输出不能直接暴露为工作流输出，请通过保存终点。")
             mode = item.get("mode", "all")
             maximum = item.get("max_iterations", 10)
@@ -296,7 +356,14 @@ class MultiConditionalPlan:
                   "seed_nodes": list(item["seeds"]), "conditions": deepcopy(item["conditions"]),
                   **{k: item[k] for k in ("mode", "max_iterations", "timeout_seconds", "on_exhausted")}}
                  for item in self.loops]
-        return {"target_id": self.target_id, "body_nodes": [n for n in self.graph.order if n in self.body],
+        return {"target_id": self.target_id,
+                **({"preview_loop_id": self.preview_loop_id,
+                    "required_loop_ids": [item["id"] for item in self.loops]}
+                   if self.preview_loop_id is not None else {}),
+                **({"preview_node_id": self.preview_node_id,
+                    "required_loop_ids": [item["id"] for item in self.loops]}
+                   if self.preview_node_id is not None else {}),
+                "body_nodes": [n for n in self.graph.order if n in self.body],
                 "fixed_nodes": [n for n in self.graph.order if n in self.fixed],
                 "max_iterations": self.max_iterations, "mode": "all", "timeout_seconds": 0,
                 "on_exhausted": "fail", "seed_nodes": [n for item in self.loops for n in item["seeds"]],
@@ -305,7 +372,7 @@ class MultiConditionalPlan:
 
 class ConditionalExecution(GraphExecution):
     def __init__(self, graph, context, cancel, deadline, progress, target_id, fixed_nodes):
-        super().__init__(graph, context, allow_side_effects=True)
+        super().__init__(graph, context, allow_side_effects=target_id is not None)
         self.cancel = cancel
         self.deadline = deadline
         self.progress = progress
@@ -341,12 +408,17 @@ class ConditionalExecution(GraphExecution):
         return super()._execute_checked(node_id)
 
 
+def _loop_preview(loop_id, iteration, accepted, execution, body):
+    return {"loop_id": loop_id, "iteration": iteration, "accepted": accepted,
+            "outputs": {n: value for n, value in execution.cache.items() if n in body}}
+
+
 def run_conditional(plan, context, cancel, progress=lambda _update: None, initial_cache=None):
     if isinstance(plan, MultiConditionalPlan):
         return _run_multiple(plan, context, cancel, progress, initial_cache)
     started = monotonic()
     deadline = started + plan.timeout if plan.timeout else None
-    fixed_cache = deepcopy(initial_cache or {})
+    fixed_cache = {n: deepcopy(v) for n, v in (initial_cache or {}).items() if n in plan.fixed}
     history = []
     execution = None
     reason = "max_iterations"
@@ -379,7 +451,8 @@ def run_conditional(plan, context, cancel, progress=lambda _update: None, initia
             entry = {"iteration": iteration, "seeds": seeds, "scores": scores,
                      "accepted": accepted, "elapsed_seconds": round(monotonic() - started, 3)}
             history.append(entry)
-            progress({"iteration_history": deepcopy(history)})
+            progress({"iteration_history": deepcopy(history),
+                      "loop_preview": _loop_preview("flat", iteration, accepted, execution, plan.body)})
             if accepted:
                 paths = execution.get_node(plan.target_id)["paths"]
                 progress({"stop_reason": "accepted"})
@@ -387,8 +460,12 @@ def run_conditional(plan, context, cancel, progress=lambda _update: None, initia
                         "stop_reason": "accepted", "paths": paths}
             fixed_cache = {node: deepcopy(result) for node, result in execution.cache.items() if node in plan.fixed}
         except LoopDeadline:
+            progress({"loop_preview": _loop_preview("flat", iteration, False, execution, plan.body)})
             reason = "timeout"
             break
+        except Exception:
+            progress({"loop_preview": _loop_preview("flat", iteration, False, execution, plan.body)})
+            raise
     progress({"stop_reason": reason})
     result = {"accepted": False, "iterations": iteration, "history": history,
               "stop_reason": reason, "paths": {}}
@@ -413,6 +490,22 @@ def _run_multiple(plan, context, cancel, progress, initial_cache):
     def report(accepted, reason, item, iteration):
         result = {"accepted": accepted, "iterations": len(history), "history": deepcopy(history),
                   "stop_reason": reason, "paths": {}, "loops": deepcopy(results)}
+        if plan.preview_loop_id is not None:
+            result.update(preview_loop_id=plan.preview_loop_id,
+                          required_loop_ids=[loop["id"] for loop in plan.loops], preview={})
+            if item["id"] == plan.preview_loop_id and execution is not None:
+                nodes = dict.fromkeys(item["end_nodes"] + condition_nodes(item))
+                # A score is often the end node. Still show computed images
+                # from this region, without rerunning generators for display.
+                nodes.update({n: None for n in plan.graph.order if n in item["body"]
+                              and any(kind in {"RGB_IMAGE", "IMAGE", "MASK"}
+                                      for kind in plan.graph.output_types[n].values())})
+                result["preview"] = {n: execution.cache[n] for n in nodes if n in execution.cache}
+        if plan.preview_node_id is not None:
+            result.update(preview_node_id=plan.preview_node_id,
+                          required_loop_ids=[loop["id"] for loop in plan.loops], preview={})
+            if accepted and execution is not None and plan.preview_node_id in execution.cache:
+                result["preview"] = {plan.preview_node_id: execution.cache[plan.preview_node_id]}
         if not accepted:
             failed = {"id": item["id"], "name": item["name"], "accepted": False,
                       "iterations": iteration, "stop_reason": reason,
@@ -459,14 +552,16 @@ def _run_multiple(plan, context, cancel, progress, initial_cache):
                     scores.append({"node": condition["node"], "output": condition["output"], "value": value,
                                    "passed": bool(OPERATORS[condition["operator"]](value, expected))})
                 accepted = (all if item["mode"] == "all" else any)(s["passed"] for s in scores)
-                if accepted:
+                if accepted or (item["id"] == plan.preview_loop_id
+                                and iteration == item["max_iterations"]):
                     for node in item["end_nodes"]:
                         execution.get_node(node)
                     execution.checkpoint()
                 history.append({"loop_id": item["id"], "loop_name": item["name"], "iteration": iteration,
                                 "seeds": seeds, "scores": scores, "accepted": accepted,
                                 "elapsed_seconds": round(monotonic() - started, 3)})
-                progress({"iteration_history": deepcopy(history)})
+                progress({"iteration_history": deepcopy(history),
+                          "loop_preview": _loop_preview(item["id"], iteration, accepted, execution, item["body"])})
                 if accepted:
                     accepted_body.update(item["body"])
                 # Do not freeze bridge nodes depending on failed/unaccepted bodies.
@@ -479,15 +574,24 @@ def _run_multiple(plan, context, cancel, progress, initial_cache):
                                     "history": [deepcopy(e) for e in history if e["loop_id"] == item["id"]]})
                     break
             except LoopDeadline:
+                progress({"loop_preview": _loop_preview(item["id"], iteration, False, execution, item["body"])})
                 return report(False, "timeout", item, iteration)
+            except Exception:
+                progress({"loop_preview": _loop_preview(item["id"], iteration, False, execution, item["body"])})
+                raise
         else:
             return report(False, "max_iterations", item, iteration)
+    if plan.preview_loop_id is not None:
+        return report(True, "accepted", item, iteration)
     # Save only after every region and every explicit end has been accepted.
     # The last region's deadline also covers late save-only dependencies.
     execution = ConditionalExecution(deepcopy(plan.graph), deepcopy(context), cancel, deadline,
                                      progress, plan.target_id, all_nodes)
     execution.cache.update(deepcopy(retained))
     try:
+        if plan.preview_node_id is not None:
+            execution.get_node(plan.preview_node_id)
+            return report(True, "accepted", item, iteration)
         paths = execution.get_node(plan.target_id)["paths"]
     except LoopDeadline:
         return report(False, "timeout", item, iteration)

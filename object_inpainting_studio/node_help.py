@@ -1,4 +1,20 @@
 NODE_HELP = {
+    "LoopDemoImageNode": {
+        "title": "循环演示·色图",
+        "summary": "纯 CPU 在原图左上角添加最多 32×32 的颜色标记，保留尺寸与其余像素；每轮模拟耗时 10 秒。不接原图时生成 32×32 色图。",
+        "inputs": {"seed": "默认 0；红、绿、蓝、灰、黄、青、紫七色周期；-1 每次随机选择非负种子。", "image": "可选 RGB 原图，连接文件夹图片遍历节点的 image；不修改输入图片。小图的标记会覆盖整张图。"},
+        "outputs": {"image": "保留原尺寸的标记图，可接评分和保存图片节点。", "value": "本轮实际使用的非负 seed，不取模；可填回 seed 复现颜色。"},
+        "test": "文件夹 image → 此节点 image → 评分 image，同时将此节点 image 接保存 img1、文件夹 filename 接保存 filename。循环起点选此节点，终点和条件选评分 score >= 255；seed=0 时每张图第 3 轮通过。点击保存节点运行整个文件夹。",
+        "parameters": [],
+    },
+    "LoopDemoScoreNode": {
+        "title": "循环演示·评分",
+        "summary": "纯 CPU 计算左上角最多 32×32 标记区域的蓝通道均值，范围 0～255；原图其余区域不影响评分。",
+        "inputs": {"image": "连接循环演示·色图的 image，或任意非空 RGB 图片。"},
+        "outputs": {"score": "标记区域蓝通道均值 FLOAT；红和绿标记为 0.0，蓝标记为 255.0；青、紫标记也会达到 255。"},
+        "test": "连接色图后测试。设为循环终点及条件 score >= 255，色图 seed 从 0 逐轮递增，红、绿失败，蓝图在第 3 轮通过；需要保存时另接已有保存图片节点。",
+        "parameters": [],
+    },
     "RecordInputNode": {
         "title": "样本输入",
         "summary": "整理一条样本的原图路径、物体 Mask 路径和物体名称，本身不读取图片。",

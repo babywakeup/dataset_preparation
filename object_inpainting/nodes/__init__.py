@@ -14,6 +14,7 @@ from .folder_images import FolderImagesNode
 from .gray_mask import GrayMaskNode
 from .load_instance_mask import LoadInstanceMaskNode
 from .load_target import LoadTargetNode
+from .loop_demo import LoopDemoImageNode, LoopDemoScoreNode
 from .mask_dilation import MaskDilationNode
 from .mask_to_rgba import MaskToRGBANode
 from .record_input import RecordInputNode
@@ -60,5 +61,7 @@ NODE_CLASS_MAPPINGS = {
         SelectColorRegionNode,
         ColorRegionSwatchesNode,
         ColorSimilarityNode,
+        LoopDemoImageNode,
+        LoopDemoScoreNode,
     )
 }

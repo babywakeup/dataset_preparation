@@ -234,12 +234,32 @@ class MultipleConditionalLoopTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "循环体"):
                     self.plan(workflow)
 
-    def test_unselected_branch_cannot_consume_undeclared_intermediate(self):
+    def test_unselected_branch_consuming_internal_output_is_not_executed(self):
         workflow = self.workflow()
         workflow["nodes"]["escape"] = {"class_type": "TestFixedNode", "inputs": {"image": link("generate", "image")}}
         self.loops(workflow)[0]["end_nodes"] = ["score_a"]
-        with self.assertRaisesRegex(ValueError, "逃逸"):
-            self.plan(workflow)
+        original = deepcopy(workflow)
+        plan = self.plan(workflow)
+        self.assertNotIn("escape", plan.graph.nodes)
+        self.assertIn("generate", plan.describe()["loops"][0]["body_nodes"])
+        self.assertTrue(all(not values for values in self.calls.values()))
+        self.assert_no_writes()
+        self.mutate_input = True
+        result = run_conditional(plan, {"image": Image.new("RGB", (3, 2), (20, 0, 40))}, Event())
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["iterations"], 4)
+        self.assertEqual(self.calls["generate"], [7, 8, 17, 18])
+        # Only the shared fixed ancestor runs, never the unselected consumer.
+        self.assertEqual(self.calls["fixed"], [(20, 0, 40)])
+        self.assertEqual(self.calls["score"], [0.0, 1.0, 0.0, 1.0])
+        self.assertEqual(self.calls["save"], [(20, 8, 40)])
+        self.assertEqual([entry["accepted"] for entry in result["history"]], [False, True, False, True])
+        self.assertEqual(set(result["paths"]), {"img1", "img2"})
+        for port, pixel in (("img1", (20, 8, 40)), ("img2", (20, 18, 40))):
+            with Image.open(result["paths"][port]) as image:
+                self.assertEqual(image.tobytes(), bytes(pixel) * 6)
+        self.assertEqual(len(list(self.output.rglob("*.png"))), 2)
+        self.assertEqual(workflow, original)
 
     def test_selected_save_reads_accepted_intermediate_without_extra_end(self):
         workflow = self.workflow()
@@ -347,30 +367,53 @@ class MultipleConditionalLoopTests(unittest.TestCase):
             with Image.open(path) as image:
                 self.assertEqual(image.getpixel((0, 0)), pixel)
 
-    def test_unselected_save_consuming_body_intermediate_still_rejected(self):
+    def test_unselected_save_consuming_body_intermediate_is_not_executed(self):
         workflow = self.workflow()
         nodes = workflow["nodes"]
         nodes["save2"] = deepcopy(nodes["save"])
         nodes["save2"]["inputs"]["dir"] = str(self.root / "alternative")
-        # The unselected save consumes only an undeclared body intermediate.
+        # Internal outputs may feed downstream consumers without being ends.
         nodes["save2"]["inputs"].pop("img2")
         nodes["save2"]["save_items"].pop()
         nodes["end"] = {"class_type": "TestFixedNode", "inputs": {"image": link("generate", "image")}}
         nodes["save"]["inputs"]["img1"] = link("end", "image")
         self.loops(workflow)[0]["end_nodes"] = ["end"]
+        original = deepcopy(workflow)
         graph = server.node_preview_graph(workflow, "save", condition_nodes(workflow["conditional_loop"]))
         self.assertNotIn("save2", graph.nodes)
-        with self.assertRaisesRegex(ValueError, "逃逸到节点 save2"):
-            build_conditional_plan(graph, "save", workflow["conditional_loop"], workflow)
-        with self.assertLogs("object_inpainting_studio.server", level="ERROR"):
-            for endpoint in ("/api/conditional/plan", "/api/conditional"):
-                response = self.client.post(endpoint, json=self.api_payload(workflow))
-                self.assertEqual(response.status_code, 422, response.text)
-                self.assertIn("逃逸到节点 save2", response.json()["detail"])
+        plan = build_conditional_plan(graph, "save", workflow["conditional_loop"], workflow)
+        self.assertIsInstance(plan, MultiConditionalPlan)
+        # Slicing is required: retaining a second side effect remains invalid.
+        with self.assertRaisesRegex(ValueError, "写盘"):
+            build_conditional_plan(NodeGraph(workflow), "save", workflow["conditional_loop"], workflow)
+        payload = self.api_payload(workflow)
+        response = self.client.post("/api/conditional/plan", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["target_id"], "save")
         self.assertIsNone(self.manager.latest())
         self.assertTrue(all(not values for values in self.calls.values()))
         self.assert_no_writes()
         self.assertFalse((self.root / "alternative").exists())
+        self.mutate_input = True
+        final = self.post_job("/api/conditional", payload)
+        self.assertEqual((final["status"], final["succeeded"], final["failed"]), ("completed", 1, 0))
+        self.assertEqual(len(final["results"]), 1)
+        result = final["results"][0]
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["iterations"], 4)
+        self.assertEqual([entry["accepted"] for entry in result["history"]], [False, True, False, True])
+        self.assertEqual(self.calls["generate"], [7, 8, 17, 18])
+        self.assertEqual(self.calls["fixed"], [(20, 0, 40), (20, 8, 40)])
+        self.assertEqual(self.calls["score"], [0.0, 1.0, 0.0, 1.0])
+        self.assertEqual(self.calls["save"], [(20, 8, 40)])
+        self.assertEqual(set(result["paths"]), {"img1", "img2"})
+        for port, pixel in (("img1", (20, 8, 40)), ("img2", (20, 18, 40))):
+            with Image.open(result["paths"][port]) as image:
+                self.assertEqual(image.tobytes(), bytes(pixel) * 6)
+        self.assertEqual({path.relative_to(self.output).as_posix() for path in self.output.rglob("*") if path.is_file()},
+                         {"accepted/accepted.png", "second/accepted.png"})
+        self.assertFalse((self.root / "alternative").exists())
+        self.assertEqual(workflow, original)
 
     def test_cross_future_dependencies_between_disjoint_bodies_rejected(self):
         workflow = self.workflow()
