@@ -5,6 +5,8 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from .port_types import LabelMap, MaskImage, OverlayRGBImage, PaletteRGBImage, RGBAImage
+
 
 FloatArray = NDArray[np.float64]
 RGBArray = NDArray[np.uint8]
@@ -51,16 +53,16 @@ class ColorRegionOutputs(TypedDict):
     """分色节点输出：区域集合、RGB 叠加图、RGB 主色图及整数标签图。"""
 
     regions: ColorRegionSet
-    overlay: Image.Image
-    palette: Image.Image
-    labels: Image.Image
+    overlay: OverlayRGBImage
+    palette: PaletteRGBImage
+    labels: LabelMap
 
 
 class SelectedRegionOutputs(TypedDict):
     """区域选择输出：全尺寸 L 模式 Mask 和保留原始颜色的 RGBA 抠图。"""
 
-    mask: Image.Image
-    rgba: Image.Image
+    mask: MaskImage
+    rgba: RGBAImage
 
 
 def weighted_lab(rgb: RGBArray) -> FloatArray:

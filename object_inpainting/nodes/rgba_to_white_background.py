@@ -1,14 +1,16 @@
 from PIL import Image
 
+from ..node_contracts import RGBAToWhiteBackgroundInputs, RGBAToWhiteBackgroundOutputs
+from ..port_types import RGBAImage
 from .base import Node
 
 
 class RGBAToWhiteBackgroundNode(Node):
-    INPUT_TYPES = {"rgba": "RGBA_IMAGE"}
-    OUTPUT_TYPES = {"rgb": "RGB_IMAGE"}
+    INPUT_SCHEMA = RGBAToWhiteBackgroundInputs
+    OUTPUT_SCHEMA = RGBAToWhiteBackgroundOutputs
     CATEGORY = "dataset"
 
-    def execute(self, rgba: Image.Image) -> dict:
+    def execute(self, rgba: RGBAImage) -> RGBAToWhiteBackgroundOutputs:
         if not isinstance(rgba, Image.Image):
             raise ValueError("RGBA 输入必须是图片对象。")
 

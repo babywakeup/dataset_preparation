@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,20 +10,24 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from object_inpainting.color_regions import ColorRegionSet
 from object_inpainting.config import PipelineConfig
-from object_inpainting.graph import NodeGraph, is_link
+from object_inpainting.graph import NodeExecutionError, NodeGraph, is_link
 from object_inpainting.nodes import NODE_CLASS_MAPPINGS
 from object_inpainting.nodes.folder_images import folder_image, scan_folder
 from object_inpainting.pipeline import DEFAULT_WORKFLOW, build_dataset
 from object_inpainting.quality import PreparedSample, validate_sample
 from object_inpainting.records import ObjectRecord, load_target
+from object_inpainting.workflow_migrations import migrate_color_swatch_outputs
 from PIL import Image, ImageOps
 
 from .batch import BatchJobs
+from .conditional_loop import build_conditional_plan, condition_nodes, loop_settings
 from .node_help import CONFIG_HELP, NODE_HELP
+from .port_names import port_labels
+from .preview_cache import PreviewCache
 
 
 ROOT = Path(__file__).parent
@@ -31,6 +36,25 @@ UPLOADS = TemporaryDirectory(prefix="object-inpainting-studio-uploads-")
 app = FastAPI(title="Object Inpainting Dataset Studio")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 BATCH_JOBS = BatchJobs()
+PREVIEW_CACHE = PreviewCache()
+LOGGER = logging.getLogger(__name__)
+
+
+@app.exception_handler(HTTPException)
+async def report_http_error(request, error: HTTPException):
+    # Keep the existing string detail for clients; add machine-readable node context.
+    content = {"detail": error.detail}
+    if isinstance(error.__cause__, NodeExecutionError):
+        content["node_error"] = error.__cause__.as_dict()
+    cause = error.__cause__
+    LOGGER.error(
+        "请求 %s 失败 (HTTP %s)：%s",
+        request.url.path,
+        error.status_code,
+        error.detail,
+        exc_info=(type(cause), cause, cause.__traceback__) if cause is not None else None,
+    )
+    return JSONResponse(status_code=error.status_code, content=content, headers=error.headers)
 
 
 def record_from_payload(payload: dict) -> ObjectRecord:
@@ -82,10 +106,15 @@ def node_catalog() -> dict:
         name: {
             "inputs": node.INPUT_TYPES,
             "outputs": node.OUTPUT_TYPES,
+            "port_labels": port_labels(name, node.INPUT_TYPES, node.OUTPUT_TYPES),
+            "input_contract": node.INPUT_SCHEMA.__name__ if node.INPUT_SCHEMA is not None else None,
+            "output_contract": node.OUTPUT_SCHEMA.__name__ if node.OUTPUT_SCHEMA is not None else None,
             "input_defaults": getattr(node, "INPUT_DEFAULTS", {}),
             "category": node.CATEGORY,
             "help": NODE_HELP[name],
             "side_effects": getattr(node, "SIDE_EFFECTS", False),
+            "dynamic_image_inputs": getattr(node, "DYNAMIC_IMAGE_INPUTS", False),
+            "dynamic_image_outputs": getattr(node, "DYNAMIC_IMAGE_OUTPUTS", False),
         }
         for name, node in NODE_CLASS_MAPPINGS.items()
     }
@@ -115,7 +144,13 @@ def validate_workflow(payload: dict):
         config = config_from_payload(payload.get("config"))
     except (KeyError, TypeError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return {"valid": True, "execution_order": graph.order, "outputs": list(graph.outputs), "config": asdict(config)}
+    return {
+        "valid": True,
+        "execution_order": graph.order,
+        "outputs": list(graph.outputs),
+        "config": asdict(config),
+        "workflow": graph.definition,
+    }
 
 
 @app.post("/api/preview")
@@ -240,13 +275,16 @@ def serialize_node_output(value) -> dict:
     return {"kind": "text", "value": str(value) if isinstance(value, Path) else value}
 
 
-def node_preview_graph(definition: dict | None, node_id: str) -> NodeGraph:
+def node_preview_graph(definition: dict | None, node_id: str, extra_nodes=()) -> NodeGraph:
     if definition is None:
         definition = json.loads(DEFAULT_WORKFLOW.read_text())
     if isinstance(definition, dict) and "workflow" in definition:
         definition = definition["workflow"]
     if not isinstance(definition, dict) or not isinstance(definition.get("nodes"), dict):
         raise ValueError("Workflow must contain a nodes object.")
+    # Inspect the complete graph before pruning consumers, so previewing a
+    # legacy swatch still exposes the images port used by its downstream save.
+    definition = migrate_color_swatch_outputs(definition)
     selected = {}
 
     def visit(current):
@@ -263,6 +301,8 @@ def node_preview_graph(definition: dict | None, node_id: str) -> NodeGraph:
                 visit(binding["node"])
 
     visit(node_id)
+    for extra in extra_nodes:
+        visit(extra)
     return NodeGraph({"nodes": selected, "outputs": {}})
 
 
@@ -277,25 +317,29 @@ def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str
         node_class = graph.registry[spec["class_type"]]
         if getattr(node_class, "SIDE_EFFECTS", False) and node_id != allowed_save_node:
             raise ValueError(f"Node {node_id}: file-writing nodes are not allowed during preview.")
-        for port, expected in node_class.INPUT_TYPES.items():
+        for port, expected in graph.input_types[node_id].items():
             binding = spec["inputs"][port]
             if expected not in {"RGB_IMAGE", "MASK", "IMAGE"} or not isinstance(binding, str):
                 continue
             if not binding.strip():
-                if port in getattr(node_class, "OPTIONAL_INPUTS", set()):
+                if node_class.optional_input(port):
                     continue
-                raise ValueError(f"Node {node_id}.{port}: choose an image or connect an upstream output.")
-            path = Path(binding).expanduser()
-            if expected == "RGB_IMAGE":
-                image = load_target(path)
-            elif expected == "IMAGE":
-                with Image.open(path) as opened:
-                    image = ImageOps.exif_transpose(opened).copy()
-            else:
-                with Image.open(path) as opened:
-                    image = ImageOps.exif_transpose(opened).convert("L")
-                    if not getattr(node_class, "PRESERVE_MASK_VALUES", False):
-                        image = image.point(lambda pixel: 255 if pixel > 127 else 0)
+            try:
+                if not binding.strip():
+                    raise ValueError(f"输入 {port}: choose an image or connect an upstream output.")
+                path = Path(binding).expanduser()
+                if expected == "RGB_IMAGE":
+                    image = load_target(path)
+                elif expected == "IMAGE":
+                    with Image.open(path) as opened:
+                        image = ImageOps.exif_transpose(opened).copy()
+                else:
+                    with Image.open(path) as opened:
+                        image = ImageOps.exif_transpose(opened).convert("L")
+                        if not getattr(node_class, "PRESERVE_MASK_VALUES", False):
+                            image = image.point(lambda pixel: 255 if pixel > 127 else 0)
+            except (OSError, ValueError, TypeError) as error:
+                raise NodeExecutionError(node_id, spec["class_type"], error) from error
             key = f"studio_image:{node_id}:{port}"
             context[key] = image
             spec["inputs"][port] = {"context": key}
@@ -306,12 +350,15 @@ def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str
 def preview_node(payload: dict):
     try:
         graph = node_preview_graph(payload.get("workflow"), payload["node_id"])
-        execution = graph.start(node_preview_context(graph, payload), allow_side_effects=False)
-        results = execution.get_node(payload["node_id"])
+        results, session, executed, reused = PREVIEW_CACHE.run(
+            graph, payload, lambda: node_preview_context(graph, payload),
+        )
         return {
             "node_id": payload["node_id"],
             "outputs": {name: serialize_node_output(value) for name, value in results.items()},
-            "executed_nodes": list(execution.cache),
+            "executed_nodes": executed,
+            "reused_nodes": reused,
+            "preview_session": session,
         }
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -320,18 +367,58 @@ def preview_node(payload: dict):
 @app.post("/api/node/save-images")
 def save_node_images(payload: dict):
     try:
+        if loop_settings(payload.get("workflow")) is not None:
+            raise ValueError("已启用条件循环，请使用条件运行；普通保存不能绕过达标判断。")
         node_id = payload["node_id"]
         graph = node_preview_graph(payload.get("workflow"), node_id)
         if graph.nodes[node_id]["class_type"] != "SaveImagesNode":
             raise ValueError("此入口仅允许执行 SaveImagesNode。")
-        context = node_preview_context(graph, payload, allowed_save_node=node_id)
-        execution = graph.start(context, allow_side_effects=True)
-        results = execution.get_node(node_id)
+        results, session, executed, reused = PREVIEW_CACHE.run(
+            graph, payload, lambda: node_preview_context(graph, payload, allowed_save_node=node_id),
+            allow_side_effects=True,
+        )
         return {
             "node_id": node_id,
             "outputs": {name: serialize_node_output(value) for name, value in results.items()},
-            "executed_nodes": list(execution.cache),
+            "executed_nodes": executed,
+            "reused_nodes": reused,
+            "preview_session": session,
         }
+    except (KeyError, OSError, ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def prepare_conditional(payload: dict):
+    definition = payload.get("workflow")
+    if isinstance(definition, dict) and "workflow" in definition:
+        definition = definition["workflow"]
+    settings = loop_settings(definition)
+    if settings is None:
+        raise ValueError("请先启用条件循环。")
+    target_id = payload["node_id"]
+    graph = node_preview_graph(definition, target_id, condition_nodes(settings))
+    plan = build_conditional_plan(graph, target_id, settings, definition)
+    output_dir = graph.nodes[target_id]["inputs"]["dir"]
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        raise ValueError("条件运行前请在保存终点直接填写 dir 输出目录。")
+    return graph, plan
+
+
+@app.post("/api/conditional/plan")
+def plan_conditional(payload: dict):
+    try:
+        _, plan = prepare_conditional(payload)
+        return plan.describe()
+    except (KeyError, OSError, ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/conditional")
+def start_conditional(payload: dict):
+    try:
+        graph, plan = prepare_conditional(payload)
+        context = node_preview_context(graph, payload, allowed_save_node=plan.target_id)
+        return BATCH_JOBS.start(graph, context, None, plan.target_id, [None], 0, False, conditional=plan)
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -339,7 +426,11 @@ def save_node_images(payload: dict):
 def prepare_batch(payload: dict):
     try:
         target_id = payload["node_id"]
-        graph = node_preview_graph(payload.get("workflow"), target_id)
+        conditional = None
+        if loop_settings(payload.get("workflow")) is not None:
+            graph, conditional = prepare_conditional(payload)
+        else:
+            graph = node_preview_graph(payload.get("workflow"), target_id)
         if graph.nodes[target_id]["class_type"] != "SaveImagesNode":
             raise ValueError("请从 SaveImagesNode 启动批量保存。")
         sources = [node_id for node_id, spec in graph.nodes.items() if spec["class_type"] == "FolderImagesNode"]
@@ -370,14 +461,14 @@ def prepare_batch(payload: dict):
         for node_id, spec in graph.nodes.items():
             if getattr(graph.registry[spec["class_type"]], "SIDE_EFFECTS", False) and node_id != target_id:
                 raise ValueError("循环范围内只能有所选的一个保存节点。")
-        return graph, source_id, target_id, paths, start_index, continue_on_error
+        return graph, source_id, target_id, paths, start_index, continue_on_error, conditional
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/api/batch/plan")
 def plan_batch(payload: dict):
-    graph, source_id, target_id, paths, start_index, _ = prepare_batch(payload)
+    graph, source_id, target_id, paths, start_index, _, conditional = prepare_batch(payload)
     return {
         "source_id": source_id,
         "target_id": target_id,
@@ -386,14 +477,22 @@ def plan_batch(payload: dict):
         "current_path": str(paths[start_index]),
         "output_dir": graph.nodes[target_id]["inputs"]["dir"],
         "executed_nodes": list(graph.order),
+        "conditional_loop": conditional.describe() if conditional is not None else None,
     }
 
 
 @app.post("/api/batch/preview")
 def preview_batch(payload: dict):
-    graph, source_id, target_id, paths, start_index, _ = prepare_batch(payload)
+    graph, source_id, target_id, paths, start_index, _, conditional = prepare_batch(payload)
     try:
         context = node_preview_context(graph, payload, allowed_save_node=target_id)
+        if conditional is not None:
+            # Use the same task lock as normal batch / single-image retries.
+            # Trial is deliberately asynchronous too: no duplicate long jobs
+            # can slip through while a synchronous HTTP request is pending.
+            job = BATCH_JOBS.start(graph, context, source_id, target_id, paths[:start_index + 1],
+                                   start_index, False, conditional=conditional)
+            return job
         execution = graph.start(context, allow_side_effects=True)
         execution.cache[source_id] = folder_image(paths[start_index], start_index, len(paths))
         results = execution.get_node(target_id)
@@ -408,10 +507,11 @@ def preview_batch(payload: dict):
 
 @app.post("/api/batch")
 def start_batch(payload: dict):
-    graph, source_id, target_id, paths, start_index, continue_on_error = prepare_batch(payload)
+    graph, source_id, target_id, paths, start_index, continue_on_error, conditional = prepare_batch(payload)
     try:
         context = node_preview_context(graph, payload, allowed_save_node=target_id)
-        return BATCH_JOBS.start(graph, context, source_id, target_id, paths, start_index, continue_on_error)
+        return BATCH_JOBS.start(graph, context, source_id, target_id, paths, start_index, continue_on_error,
+                       conditional=conditional)
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

@@ -31,15 +31,17 @@
           <button data-starter="MaskToRGBANode">⑥ Mask 转透明抠图</button>
           <button data-starter="RGBAToWhiteBackgroundNode">⑦ RGBA 转白底参考图</button>
           <button data-starter="FluxKleinReferenceNode">⑧ FLUX2 Klein 参考图生成</button>
-          <button data-starter="SaveImagesNode">⑨ 保存最多四张图片</button>
+          <button data-starter="SaveImagesNode">⑨ 保存图片 / 动态保存项</button>
           <button data-starter="FolderImagesNode">⑩ 读取服务器文件夹图片</button>
           <button data-starter="AutoColorRegionsNode">⑪ Mask 内自动颜色分区</button>
           <button data-starter="FluxRandomRecolorNode">⑫ FLUX2 衣服随机换色</button>
+          <button data-starter="MaskDilationNode">⑬ Mask 膨胀（独立）</button>
         </div>
         <details class="workflow-guide"><summary>完整流程在做什么？</summary><p>原图 + 物体 Mask → 检查物体 → 抠出参考图；Mask 向外扩展 → 原图对应区域涂灰；加上提示词 → 检查样本 → 导出训练数据。Mask 可以来自已有标注，也可用 SAM2 按物体框生成，或用 SAM3 按文本生成。完整示例默认仍读取已有 Mask，不运行图像生成模型。</p></details>
-        <h2>添加节点</h2><p>点击添加，拖动标题移动。点击输出圆点，再点同类型输入圆点来连接。</p>
+        <h2>添加节点</h2><p>端口统一显示“格式名 · 中文用途”；原图 rgb_image、涂灰图 masked_rgb_image、黑白 mask、透明 rgba_image、参考图 reference_rgb_image。点击输出圆点，高亮同用途输入；同类型不代表用途或尺寸一定匹配。悬停查看内部字段，旧工作流无需修改。</p>
       </aside>
       <section id="workspace-wrap">
+        <div id="execution-toolbars">
         <section id="loop-toolbar" aria-labelledby="loop-title">
           <div class="loop-heading"><strong id="loop-title">↻ 文件夹逐张处理</strong><span id="loop-mode">单张调试</span></div>
           <p id="loop-summary">添加文件夹节点，开启「↻ 逐张」，自动标出重复执行的路径。</p>
@@ -56,6 +58,19 @@
           <p id="loop-message" role="status" aria-live="polite"></p>
           <div class="loop-legend"><span>● 绿色：每张重复的路径</span><span>● 琥珀色：固定输入，不遍历</span><span>灰色：不执行</span></div>
         </section>
+        <details id="conditional-panel">
+          <summary>↻ 条件循环 <span id="conditional-badge"></span><button id="conditional-add" type="button">＋ 添加循环</button></summary>
+          <p>添加后依次点击具体节点标题：起点 → 终点 → 条件。起终点是普通计算节点；所有循环通过后，才写入公用保存目标。独立 / 串联循环按数据依赖自动排序，不支持重叠或嵌套。</p>
+          <div id="multiple-loops"></div>
+          <p id="conditional-error" role="alert"></p>
+          <p id="conditional-plan" role="status" aria-live="polite"></p>
+          <div class="conditional-actions">
+            <button id="conditional-check">检查单图计划 · 不推理 / 不写盘</button>
+            <button id="conditional-run" disabled>条件运行当前张 · 通过后保存</button>
+          </div>
+          <p>文件夹模式使用左侧的试跑 / 运行全部。非负 literal seed 可自动逐轮递增；seed=-1 保持随机，不必先选种子。超时和停止仅在节点之间检查，不会强杀 GPU 推理。</p>
+        </details>
+        </div>
         <div id="workspace"><div id="loop-region" hidden><strong>↻ 每张图片执行一次</strong><span></span></div><svg id="connections"></svg><div id="nodes"></div></div>
         <div id="connection-hint">Select an output port to begin a connection.</div>
       </section>
@@ -76,6 +91,7 @@
           </div>
           <progress id="batch-progress" max="1" value="0" aria-label="批量文件处理进度"></progress>
           <pre id="batch-current"></pre>
+          <details id="conditional-history"><summary>当前图片 · 条件尝试记录（仅标量）</summary><ol id="conditional-attempts"></ol></details>
           <p id="batch-error" role="alert"></p>
           <div class="batch-actions">
             <button id="batch-cancel" disabled>停止任务</button>
@@ -101,7 +117,9 @@
       </aside>
     </main>
     <dialog id="image-dialog"><button id="close-image-dialog">关闭</button><img alt="节点输出大图" /></dialog>
+    <script src="/static/node_editing.js"></script>
     <script src="/static/loop.js"></script>
+    <script src="/static/multiple_loops.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

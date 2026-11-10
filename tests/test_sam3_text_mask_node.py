@@ -104,6 +104,65 @@ class SAM3TextMaskNodeTests(unittest.TestCase):
         ):
             sam3_text_mask.SAM3TextMaskNode().execute(self.image, "cup")
 
+    def test_threshold_parameters_reach_real_sam3_postprocessor(self):
+        self.masks[0, 1, 1, 4] = -0.2  # sigmoid is below 0.5 but above 0.4.
+        self.model.return_value.pred_logits[0, 1] = 0  # confidence 0.5, below default detection threshold.
+        self.model.return_value.pred_logits[0, 0] = -2  # Keep the first instance below both thresholds.
+        with patch.object(sam3_text_mask, "get_sam3", return_value=(self.model, self.processor)):
+            with self.assertRaisesRegex(ValueError, "未找到.*0.5"):
+                sam3_text_mask.SAM3TextMaskNode().execute(self.image, "bag")
+            result = sam3_text_mask.SAM3TextMaskNode().execute(
+                self.image, "bag", threshold=0.4, mask_threshold=0.4
+            )
+        self.assertEqual(result["object_mask"].getpixel((4, 1)), 255)
+        self.assertEqual(result["bbox"], [3, 1, 8, 6])
+        self.assertEqual(
+            self.processor.post_process_instance_segmentation.call_args.kwargs,
+            {"threshold": 0.4, "mask_threshold": 0.4, "target_sizes": [(8, 12)]},
+        )
+
+    def test_invalid_controls_are_rejected_before_model_loading(self):
+        invalid = {
+            "threshold": (-0.1, 1.1, float("nan"), float("inf"), True, "0.5", None),
+            "mask_threshold": (-0.1, 1.1, float("nan"), float("inf"), False, "0.5", None),
+        }
+        with patch.object(sam3_text_mask, "get_sam3") as loader:
+            for key, values in invalid.items():
+                for value in values:
+                    with self.subTest(parameter=key, value=value), self.assertRaisesRegex(ValueError, key):
+                        sam3_text_mask.SAM3TextMaskNode().execute(self.image, "bag", **{key: value})
+            loader.assert_not_called()
+
+    def test_no_match_error_uses_configured_threshold(self):
+        self.model.return_value.pred_logits = torch.full((1, 3), -10.0)
+        with (
+            patch.object(sam3_text_mask, "get_sam3", return_value=(self.model, self.processor)),
+            self.assertRaisesRegex(ValueError, "未找到.*0.8"),
+        ):
+            sam3_text_mask.SAM3TextMaskNode().execute(self.image, "bag", threshold=0.8)
+
+    def test_catalog_exposes_node_controls_and_graph_defaults(self):
+        catalog = TestClient(app).get("/api/node-types").json()["SAM3TextMaskNode"]
+        self.assertEqual(
+            catalog["input_defaults"],
+            {"threshold": 0.5, "mask_threshold": 0.5},
+        )
+        for key, port_type in (
+            ("threshold", "FLOAT"), ("mask_threshold", "FLOAT"),
+        ):
+            self.assertEqual(catalog["inputs"][key], port_type)
+            self.assertIn(key, catalog["help"]["inputs"])
+            self.assertTrue(catalog["port_labels"]["inputs"][key]["role"])
+        self.assertEqual(catalog["help"]["parameters"], [])  # Node controls are not shared config.
+
+    def test_dilation_controls_are_removed_from_sam3_interface(self):
+        node = sam3_text_mask.SAM3TextMaskNode()
+        for key in ("dilation_steps", "dilation_kernel"):
+            self.assertNotIn(key, node.INPUT_TYPES)
+            self.assertNotIn(key, node.INPUT_DEFAULTS)
+            with self.subTest(key=key), self.assertRaises(TypeError):
+                node.execute(self.image, "bag", **{key: 1})
+
     def test_empty_selected_mask_is_not_accepted(self):
         self.masks.fill_(-10)
         with (

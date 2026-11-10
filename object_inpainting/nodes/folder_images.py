@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from ..node_contracts import FolderImagesInputs, FolderImagesOutputs
+from ..port_types import FilePath
 from ..records import load_target
 from .base import Node
 
@@ -25,17 +27,17 @@ def scan_folder(dir: str | Path, recursive: int = 0) -> list[Path]:
     return images
 
 
-def folder_image(path: Path, index: int, total: int) -> dict:
+def folder_image(path: Path, index: int, total: int) -> FolderImagesOutputs:
     return {"image": load_target(path), "path": str(path), "filename": path.name, "index": index, "total": total}
 
 
 class FolderImagesNode(Node):
-    INPUT_TYPES = {"dir": "PATH", "recursive": "INT", "index": "INT"}
+    INPUT_SCHEMA = FolderImagesInputs
     INPUT_DEFAULTS = {"dir": "", "recursive": 0, "index": 0}
-    OUTPUT_TYPES = {"image": "RGB_IMAGE", "path": "PATH", "filename": "STRING", "index": "INT", "total": "INT"}
+    OUTPUT_SCHEMA = FolderImagesOutputs
     CATEGORY = "input"
 
-    def execute(self, dir: str | Path, recursive: int = 0, index: int = 0) -> dict:
+    def execute(self, dir: FilePath, recursive: int = 0, index: int = 0) -> FolderImagesOutputs:
         paths = scan_folder(dir, recursive)
         if type(index) is not int or not 0 <= index < len(paths):
             raise ValueError(f"index 必须在 0～{len(paths) - 1} 之间。")

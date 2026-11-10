@@ -2,6 +2,8 @@
 
 `FluxRandomRecolorNode` 真实调用现有的 `Flux2KleinPipeline`，默认使用本地 FLUX.2-klein-base-9B。source 的换色像素来自模型生成，不是程序填色；节点内部使用涂灰原图作为位置参考，并输出 `masked_source` 涂灰辅助图。
 
+> 界面已按真实用途统一命名：输入 `target` 显示 `rgb_image · 目标原图`，输入 `mask` 显示 `masked_rgb_image · 涂灰原图，不是黑白 Mask`。GrayMaskNode 的 `source` 输出也显示 `masked_rgb_image`，直接连接同名端口即可。换色输出 `source` 显示 `rgb_image · 换色结果，未涂灰`，输出 `masked_source` 显示 `masked_rgb_image`，输出二值 `mask` 才显示 `mask`。下文 Python / JSON 接口仍使用原字段，已有流程无需改名。
+
 ## 怎么使用
 
 1. 重启 Studio，刷新浏览器，保存已有工作流。

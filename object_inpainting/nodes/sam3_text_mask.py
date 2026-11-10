@@ -1,12 +1,15 @@
 import os
 from contextlib import nullcontext
 from functools import lru_cache
+from math import isfinite
 from pathlib import Path
 from threading import Lock
 
 import numpy as np
 from PIL import Image
 
+from ..node_contracts import SAM3TextMaskInputs, SAM3TextMaskOutputs
+from ..port_types import RGBImage
 from .base import Node
 
 
@@ -26,14 +29,27 @@ def get_sam3(model_dir: str, device: str):
 
 
 class SAM3TextMaskNode(Node):
-    INPUT_TYPES = {"image": "RGB_IMAGE", "text": "STRING"}
-    OUTPUT_TYPES = {"object_mask": "MASK", "bbox": "BBOX", "quality": "STRING"}
+    INPUT_SCHEMA = SAM3TextMaskInputs
+    OUTPUT_SCHEMA = SAM3TextMaskOutputs
+    INPUT_DEFAULTS = {
+        "threshold": 0.5,
+        "mask_threshold": 0.5,
+    }
     CATEGORY = "dataset"
 
-    def execute(self, image: Image.Image, text: str) -> dict:
+    def execute(
+        self,
+        image: RGBImage,
+        text: str,
+        threshold: float = 0.5,
+        mask_threshold: float = 0.5,
+    ) -> SAM3TextMaskOutputs:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("请输入要分割的物体文本，例如 cup、red bag 或 truck。")
         text = text.strip()
+        for name, value in (("threshold", threshold), ("mask_threshold", mask_threshold)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{name} 必须是 0 到 1 之间的有限数值。")
 
         try:
             import torch
@@ -72,11 +88,11 @@ class SAM3TextMaskNode(Node):
                 with torch.inference_mode(), autocast:
                     outputs = model(**inputs)
                     result = processor.post_process_instance_segmentation(
-                        outputs, threshold=0.5, mask_threshold=0.5, target_sizes=[(height, width)]
+                        outputs, threshold=threshold, mask_threshold=mask_threshold, target_sizes=[(height, width)]
                     )[0]
                 scores = result["scores"].detach().float().cpu().numpy()
                 if not len(scores):
-                    raise ValueError("SAM3 未找到置信度超过 0.5 的匹配物体，请换用更具体的简短英文描述。")
+                    raise ValueError(f"SAM3 未找到置信度超过 {threshold:g} 的匹配物体，请换用更具体的简短英文描述。")
                 if not np.isfinite(scores).all():
                     raise ValueError("SAM3 返回了无效置信度。")
                 best = int(scores.argmax())
@@ -89,13 +105,15 @@ class SAM3TextMaskNode(Node):
             raise ValueError("SAM3 输出 Mask 尺寸与输入图片不一致。")
         if not mask.any():
             raise ValueError("SAM3 选中的物体 Mask 为空，请调整文本描述。")
+        object_mask = Image.fromarray(mask.astype(np.uint8) * 255)
         ys, xs = np.nonzero(mask)
         bbox = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
         return {
-            "object_mask": Image.fromarray(mask.astype(np.uint8) * 255),
+            "object_mask": object_mask,
             "bbox": bbox,
             "quality": (
                 f"SAM3 文本：{text}；匹配 {len(scores)} 个物体，已选择置信度最高的单个实例；"
                 f"预测置信度：{quality:.4f}（非实测准确率），未合并多个物体。"
+                f"置信度阈值：{threshold:g}；Mask 阈值：{mask_threshold:g}；不执行 Mask 膨胀。"
             ),
         }

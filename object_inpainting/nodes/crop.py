@@ -1,19 +1,14 @@
-from PIL import Image
-
+from ..node_contracts import CropInputs, CropOutputs
+from ..port_types import BoundingBox, RGBImage
 from .base import Node
 
 
 class CropNode(Node):
-    INPUT_TYPES = {
-        "image": "RGB_IMAGE",
-        "bbox": "BBOX",
-    }
-    OUTPUT_TYPES = {
-        "cropped": "RGB_IMAGE",
-    }
+    INPUT_SCHEMA = CropInputs
+    OUTPUT_SCHEMA = CropOutputs
     CATEGORY = "dataset"
 
-    def execute(self, image: Image.Image, bbox):
+    def execute(self, image: RGBImage, bbox: BoundingBox) -> CropOutputs:
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
             raise ValueError("裁剪框必须是 [左, 上, 右, 下]。")
 

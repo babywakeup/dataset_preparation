@@ -11,6 +11,31 @@ from object_inpainting_studio.server import app
 from PIL import Image
 
 
+class FluxKleinLoadingTests(unittest.TestCase):
+    def test_loader_passes_supported_torch_dtype_and_stays_offline(self):
+        import torch
+
+        from diffusers import Flux2KleinPipeline
+
+        for device, dtype in (("cpu", torch.float32), ("cuda:0", torch.bfloat16)):
+            with self.subTest(device=device):
+                flux_klein_reference.get_flux_klein.cache_clear()
+                self.addCleanup(flux_klein_reference.get_flux_klein.cache_clear)
+                with patch.object(Flux2KleinPipeline, "from_pretrained") as load:
+                    pipeline = load.return_value
+                    result = flux_klein_reference.get_flux_klein("local-model", device)
+                    load.assert_called_once_with(
+                        "local-model",
+                        torch_dtype=dtype,
+                        cache_dir=str(flux_klein_reference.CACHE_DIR),
+                        local_files_only=True,
+                    )
+                    pipeline.to.assert_called_once_with(device)
+                    self.assertIs(result, pipeline.to.return_value)
+                    flux_klein_reference.get_flux_klein("local-model", device)
+                    load.assert_called_once()
+
+
 class FluxKleinGenerationTests(unittest.TestCase):
     def setUp(self):
         self.calls = []

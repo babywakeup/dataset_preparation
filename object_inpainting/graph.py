@@ -1,4 +1,5 @@
 import json
+import logging
 from copy import deepcopy
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
@@ -10,6 +11,33 @@ from .config import PipelineConfig
 from .nodes import NODE_CLASS_MAPPINGS
 from .quality import PreparedSample
 from .records import ObjectRecord
+from .workflow_migrations import migrate_color_swatch_outputs, migrate_sam3_dilation
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class GraphExecutionCancelled(Exception):
+    """Control-flow signal; cancellation must not be reported as a node failure."""
+
+
+class NodeExecutionError(ValueError):
+    """Identify the original failing node without attaching input data."""
+
+    def __init__(self, node_id: str, class_type: str, error: Exception):
+        self.node_id = node_id
+        self.class_type = class_type
+        self.error_type = type(error).__name__
+        self.message = str(error) or self.error_type
+        super().__init__(f"节点 {node_id} ({class_type}) 失败：{self.error_type}: {self.message}")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "node_id": self.node_id,
+            "class_type": self.class_type,
+            "error_type": self.error_type,
+            "message": self.message,
+        }
 
 
 def is_link(binding) -> bool:
@@ -22,10 +50,18 @@ class NodeGraph:
             raise ValueError("Workflow must contain a nodes object.")
         if not isinstance(definition.get("outputs"), dict):
             raise ValueError("Workflow must contain an outputs object.")
-        self.definition = deepcopy(definition)
         self.registry = dict(NODE_CLASS_MAPPINGS if registry is None else registry)
+        self.definition = (
+            migrate_sam3_dilation(definition)
+            if {"SAM3TextMaskNode", "MaskDilationNode"}.issubset(self.registry)
+            else deepcopy(definition)
+        )
+        if getattr(self.registry.get("ColorRegionSwatchesNode"), "DYNAMIC_IMAGE_OUTPUTS", False):
+            self.definition = migrate_color_swatch_outputs(self.definition)
         self.nodes = self.definition["nodes"]
         self.outputs = self.definition["outputs"]
+        self.input_types: dict[str, dict[str, str]] = {}
+        self.output_types: dict[str, dict[str, str]] = {}
         dependencies = {}
         for node_id, spec in self.nodes.items():
             if not isinstance(node_id, str) or not node_id:
@@ -39,12 +75,21 @@ class NodeGraph:
             if node_type not in self.registry:
                 raise ValueError(f"Node {node_id}: unknown class_type {node_type}.")
             node_class = self.registry[node_type]
+            node_class.prepare_spec(spec)
+            input_types = self.input_types[node_id] = node_class.input_types(spec)
+            self.output_types[node_id] = node_class.output_types(spec)
             for port, value in getattr(node_class, "INPUT_DEFAULTS", {}).items():
-                spec["inputs"].setdefault(port, deepcopy(value))
-            for port in getattr(node_class, "OPTIONAL_INPUTS", set()):
-                spec["inputs"].setdefault(port, None)
-            if set(spec["inputs"]) != set(node_class.INPUT_TYPES):
-                raise ValueError(f"Node {node_id}: inputs must match {list(node_class.INPUT_TYPES)}.")
+                if port in input_types:
+                    spec["inputs"].setdefault(port, deepcopy(value))
+            for port in input_types:
+                if node_class.optional_input(port):
+                    spec["inputs"].setdefault(port, None)
+            if set(spec["inputs"]) != set(input_types):
+                raise ValueError(f"Node {node_id}: inputs must match {list(input_types)}.")
+        # Normalize every instance before checking links, including links to a
+        # dynamic-output node appearing later in the serialized nodes object.
+        for node_id, spec in self.nodes.items():
+            input_types = self.input_types[node_id]
             dependencies[node_id] = []
             for port, binding in spec["inputs"].items():
                 if isinstance(binding, dict) and "context" in binding:
@@ -56,7 +101,7 @@ class NodeGraph:
                         raise ValueError(f"Node {node_id}.{port}: context name must be a non-empty string.")
                 if is_link(binding):
                     source_type = self._validate_link(binding)
-                    expected_type = node_class.INPUT_TYPES[port]
+                    expected_type = input_types[port]
                     if source_type != expected_type and not (
                         expected_type == "IMAGE" and source_type in {"RGB_IMAGE", "RGBA_IMAGE", "MASK", "LABEL_MAP"}
                     ):
@@ -80,7 +125,7 @@ class NodeGraph:
         node_type = self.nodes[node_id]["class_type"]
         if node_type not in self.registry:
             raise ValueError(f"Node {node_id}: unknown class_type {node_type}.")
-        ports = self.registry[node_type].OUTPUT_TYPES
+        ports = self.output_types[node_id]
         if port not in ports:
             raise ValueError(f"Unknown output port: {node_id}.{port}.")
         return ports[port]
@@ -104,6 +149,8 @@ class NodeGraph:
             json.dump(self.definition, handle, ensure_ascii=False, indent=2)
 
     def start(self, context: dict, allow_side_effects: bool = True):
+        if self.definition.get("conditional_loop") is not None:
+            raise ValueError("Conditional loops require the Studio conditional task executor; ordinary DAG execution cannot bypass acceptance.")
         return GraphExecution(self, context, allow_side_effects)
 
     def run(self, context: dict, outputs=None, allow_side_effects: bool = True) -> dict:
@@ -139,6 +186,17 @@ class GraphExecution:
         return binding
 
     def _execute(self, node_id: str) -> dict:
+        try:
+            return self._execute_checked(node_id)
+        except (NodeExecutionError, GraphExecutionCancelled):
+            # Preserve the upstream origin and the batch cancellation signal.
+            raise
+        except Exception as error:
+            failure = NodeExecutionError(node_id, self.graph.nodes[node_id]["class_type"], error)
+            LOGGER.exception("%s", failure)
+            raise failure from error
+
+    def _execute_checked(self, node_id: str) -> dict:
         if node_id not in self.cache:
             spec = self.graph.nodes[node_id]
             node_class = self.graph.registry[spec["class_type"]]
@@ -157,24 +215,24 @@ class GraphExecution:
                 "COLOR_REGIONS": ColorRegionSet,
                 "BBOX": (tuple, list),
                 "INT": int,
+                "INT_LIST": list,
+                "IMAGE_LIST": list,
                 "FLOAT": (int, float),
                 "PREPARED_SAMPLE": PreparedSample,
                 "JSON_RECORD": dict,
             }
             for port, value in inputs.items():
-                expected = node_class.INPUT_TYPES[port]
-                optional = port in getattr(node_class, "OPTIONAL_INPUTS", set())
+                expected = self.graph.input_types[node_id][port]
+                optional = node_class.optional_input(port)
                 if optional and value is None:
                     continue
                 if optional and isinstance(value, str) and not value.strip():
                     continue
                 if expected in types and not isinstance(value, types[expected]):
                     raise ValueError(f"Node {node_id}.{port}: invalid runtime value for {expected}.")
-            try:
-                result = node_class().execute(**inputs)
-            except (TypeError, AttributeError, KeyError) as error:
-                raise ValueError(f"Node {node_id}: {error}") from error
-            if not isinstance(result, dict) or set(result) != set(node_class.OUTPUT_TYPES):
-                raise ValueError(f"Node {node_id}: returned outputs must match {list(node_class.OUTPUT_TYPES)}.")
+            result = node_class().execute_with_spec(inputs, spec)
+            output_types = self.graph.output_types[node_id]
+            if not isinstance(result, dict) or set(result) != set(output_types):
+                raise ValueError(f"Node {node_id}: returned outputs must match {list(output_types)}.")
             self.cache[node_id] = result
         return self.cache[node_id]

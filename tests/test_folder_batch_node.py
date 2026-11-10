@@ -95,6 +95,25 @@ class FolderBatchTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/batch/latest").json()["job"], job)
         self.assertNotIn("data:image", json.dumps(job))
 
+    def test_dynamic_named_items_use_each_source_filename_and_reject_rerun_conflicts(self):
+        self.image("a.jpg", "red")
+        self.image("b.png", "blue")
+        workflow = self.workflow()
+        save = workflow["nodes"]["save"]
+        save["save_items"] = [{"id": f"img{i}", "name": f"view_{i}"} for i in range(1, 13)]
+        save["inputs"] = {"dir": str(self.output), "filename": {"node": "folder", "output": "filename"},
+                          **{f"img{i}": {"node": "folder", "output": "image"} for i in range(1, 13)}}
+        job = self.start(workflow)
+        self.assertEqual((job["succeeded"], job["failed"]), (2, 0))
+        for result, filename in zip(job["results"], ("a.png", "b.png")):
+            self.assertEqual(len(result["paths"]), 12)
+            self.assertEqual({Path(path).name for path in result["paths"].values()}, {filename})
+            self.assertEqual(Path(result["paths"]["img12"]).parent.name, "view_12")
+        rerun = self.start(workflow)
+        self.assertEqual((rerun["succeeded"], rerun["failed"]), (0, 2))
+        self.assertIn("已存在", rerun["results"][0]["error"])
+        self.assertEqual(len(list(self.output.rglob("*.png"))), 24)
+
     def test_loop_plan_counts_without_executing_nodes_or_writing(self):
         self.image("a.png", "red")
         (self.input / "b.png").write_bytes(b"broken image")

@@ -1,15 +1,15 @@
-from PIL import Image
-
+from ..node_contracts import MaskToRGBAInputs, MaskToRGBAOutputs
+from ..port_types import MaskImage, RGBImage
 from .base import Node
 
 
 class MaskToRGBANode(Node):
-    INPUT_TYPES = {"image": "RGB_IMAGE", "mask": "MASK"}
-    OUTPUT_TYPES = {"rgba": "RGBA_IMAGE"}
+    INPUT_SCHEMA = MaskToRGBAInputs
+    OUTPUT_SCHEMA = MaskToRGBAOutputs
     CATEGORY = "dataset"
     PRESERVE_MASK_VALUES = True
 
-    def execute(self, image: Image.Image, mask: Image.Image) -> dict:
+    def execute(self, image: RGBImage, mask: MaskImage) -> MaskToRGBAOutputs:
         if image.size != mask.size:
             raise ValueError("原图与 Mask 尺寸必须一致。")
         if mask.mode not in {"1", "L"}:

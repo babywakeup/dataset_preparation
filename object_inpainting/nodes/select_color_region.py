@@ -1,13 +1,14 @@
-from ..color_regions import ColorRegionSet, SelectedRegionOutputs, select_color_region
+from ..color_regions import ColorRegionSet, select_color_region
+from ..node_contracts import SelectColorRegionInputs, SelectedRegionOutputs
 from .base import Node
 
 
 class SelectColorRegionNode(Node):
     """将区域集合中的一个编号转换为普通 Mask 和 RGBA 图片。"""
 
-    INPUT_TYPES = {"regions": "COLOR_REGIONS", "region_id": "INT"}
+    INPUT_SCHEMA = SelectColorRegionInputs
     INPUT_DEFAULTS = {"region_id": 1}
-    OUTPUT_TYPES = {"mask": "MASK", "rgba": "RGBA_IMAGE"}
+    OUTPUT_SCHEMA = SelectedRegionOutputs
     CATEGORY = "dataset"
 
     def execute(self, regions: ColorRegionSet, region_id: int = 1) -> SelectedRegionOutputs:

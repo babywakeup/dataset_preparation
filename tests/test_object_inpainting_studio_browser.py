@@ -53,6 +53,404 @@ class StudioBrowserTests(unittest.TestCase):
         self.page.goto(self.base_url + "/")
         expect(self.page.locator("#status")).to_contain_text("Ready.")
 
+    def test_conditional_retry_ui_checks_plan_saves_only_accepted_attempt(self) -> None:
+        if os.environ.get("STUDIO_TEST_URL"):
+            self.skipTest("model substitute requires the in-process server")
+        original = self.fixture.root / "conditional-original.png"
+        reference = self.fixture.root / "conditional-reference.png"
+        output = self.fixture.root / "conditional-output"
+        Image.new("RGB", (32, 32), "white").save(original)
+        Image.new("RGB", (32, 32), "blue").save(reference)
+        workflow = {"nodes": {
+            "source": {"class_type": "LoadTargetNode", "inputs": {"path": str(original)}},
+            "generate": {"class_type": "FluxKleinReferenceNode", "inputs": {
+                "reference_1": {"node": "source", "output": "target"}, "prompt": "test", "seed": 0}},
+            "score": {"class_type": "ColorSimilarityNode", "inputs": {
+                "image1": {"node": "generate", "output": "image"}, "image2": str(reference)}},
+            "save": {"class_type": "SaveImagesNode", "inputs": {
+                "img1": {"node": "generate", "output": "image"}, "dir": str(output), "filename": "accepted"}},
+        }, "outputs": {}}
+        calls = []
+
+        def generate(**inputs):
+            calls.append(inputs["seed"])
+            return {"image": Image.new("RGB", (32, 32), "blue" if inputs["seed"] == 1 else "red")}
+
+        self.page.evaluate("""workflow => {
+            state.workflow = workflow; restoreLoop(); render();
+        }""", workflow)
+        self.page.locator("#conditional-panel").evaluate("element => element.open = true")
+        self.page.locator("#conditional-legacy").click()
+        self.page.locator("#conditional-enabled").check()
+        self.page.get_by_label("单图条件保存终点", exact=True).select_option("save")
+        self.page.get_by_label("显式起点 · 可多选（Ctrl / Cmd）", exact=True).select_option("generate")
+        self.page.get_by_label("递增种子节点 · 可多选，须在循环体内", exact=True).select_option("generate")
+        self.page.get_by_role("button", name="＋ 添加条件", exact=True).click()
+        self.page.get_by_label("条件 1 输出", exact=True).select_option(json.dumps(["score", "score"], separators=(",", ":")))
+        self.page.get_by_label("条件 1 运算符", exact=True).select_option("<=")
+        threshold = self.page.get_by_label("条件 1 阈值", exact=True)
+        threshold.fill("1")
+        threshold.press("Tab")
+        with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", side_effect=generate):
+            self.page.locator("#conditional-check").click()
+            expect(self.page.locator("#conditional-plan")).to_contain_text("循环体：generate、score")
+            self.assertEqual(calls, [])
+            self.assertFalse(output.exists())
+            self.page.locator("#conditional-run").click()
+            expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
+        self.assertEqual(calls, [0, 1])
+        expect(self.page.locator("#batch-counts")).to_contain_text("成功 1")
+        expect(self.page.locator("#batch-current")).to_contain_text("accepted")
+        expect(self.page.locator("#conditional-attempts")).to_contain_text("score.score")
+        written = list(output.rglob("*.png"))
+        self.assertEqual(len(written), 1)
+        with Image.open(written[0]) as image:
+            self.assertEqual(image.getpixel((0, 0)), (0, 0, 255))
+        self.assertEqual(self.errors, [])
+
+    def test_multiple_loop_wizard_runs_each_region_and_saves_once(self) -> None:
+        if os.environ.get("STUDIO_TEST_URL"):
+            self.skipTest("model substitute requires the in-process server")
+        original = self.fixture.root / "multiple-original.png"
+        reference = self.fixture.root / "multiple-reference.png"
+        output = self.fixture.root / "multiple-output"
+        Image.new("RGB", (32, 32), "white").save(original)
+        Image.new("RGB", (32, 32), "blue").save(reference)
+        workflow = {"nodes": {
+            "source": {"class_type": "LoadTargetNode", "inputs": {"path": str(original)}},
+            "generate": {"class_type": "FluxKleinReferenceNode", "inputs": {
+                "reference_1": {"node": "source", "output": "target"}, "prompt": "first", "seed": 0}},
+            "generate_2": {"class_type": "FluxKleinReferenceNode", "inputs": {
+                "reference_1": {"node": "source", "output": "target"}, "prompt": "second", "seed": 10}},
+            "score": {"class_type": "ColorSimilarityNode", "inputs": {
+                "image1": {"node": "generate", "output": "image"}, "image2": str(reference)}},
+            "score_2": {"class_type": "ColorSimilarityNode", "inputs": {
+                "image1": {"node": "generate_2", "output": "image"}, "image2": str(reference)}},
+            "save": {"class_type": "SaveImagesNode", "inputs": {
+                "img1": {"node": "generate", "output": "image"},
+                "img2": {"node": "generate_2", "output": "image"},
+                "dir": str(output), "filename": "accepted"}},
+        }, "outputs": {}}
+        calls = []
+
+        def generate(**inputs):
+            calls.append((inputs["prompt"], inputs["seed"]))
+            return {"image": Image.new("RGB", (32, 32), "blue" if inputs["seed"] % 10 == 1 else "red")}
+
+        self.page.evaluate("""workflow => {
+            state.workflow = workflow; restoreLoop(); state.layout = {}; render();
+        }""", workflow)
+        expect(self.page.locator("#conditional-panel")).not_to_have_attribute("open", "")
+        for generator, score in (("generate", "score"), ("generate_2", "score_2")):
+            self.page.locator("#conditional-add").click()
+            self.page.locator(f'.node[data-node-id="{generator}"] .node-header').click()
+            self.assertEqual(self.page.evaluate("conditionalUI.picking.kind"), "end_nodes")
+            self.page.locator(f'.node[data-node-id="{score}"] .node-header').click()
+            self.assertEqual(self.page.evaluate("conditionalUI.picking.kind"), "condition")
+            # A node with one scalar output can be selected by title alone.
+            self.page.locator(f'.node[data-node-id="{score}"] .node-header').click()
+            self.assertIsNone(self.page.evaluate("conditionalUI.picking"))
+        expect(self.page.locator(".multiple-loop-card")).to_have_count(2)
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops.map(l => [l.start_nodes, l.end_nodes, l.conditions[0].node])"), [
+            [["generate"], ["score"], "score"], [["generate_2"], ["score_2"], "score_2"]
+        ])
+        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save")
+        second = self.page.locator(".multiple-loop-card").nth(1)
+        name = second.get_by_label("循环名称", exact=True)
+        name.fill("第二个换色循环")
+        # A progress-only render must not replace the focused input.
+        self.page.evaluate("window.focusedLoopInput = document.activeElement; renderBatch()")
+        self.assertTrue(self.page.evaluate("window.focusedLoopInput === document.activeElement"))
+        name.press("Tab")
+        expect(self.page.locator("#conditional-error")).to_have_text("")
+        with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", side_effect=generate):
+            self.page.locator("#conditional-check").click()
+            expect(self.page.locator("#conditional-plan")).to_contain_text("第二个换色循环")
+            self.assertFalse(output.exists())
+            self.assertEqual(calls, [])
+            self.page.locator("#conditional-run").click()
+            expect(self.page.locator("#batch-status")).to_contain_text("已完成", timeout=15000)
+        self.assertEqual(calls, [("first", 0), ("first", 1), ("second", 10), ("second", 11)])
+        self.assertEqual(self.page.evaluate("batch.job.results[0].loops.map(l => l.iterations)"), [2, 2])
+        expect(self.page.locator("#conditional-attempts")).to_contain_text("第二个换色循环")
+        written = list(output.rglob("*.png"))
+        self.assertEqual(len(written), 2)
+        for path in written:
+            with Image.open(path) as image:
+                self.assertEqual(image.getpixel((0, 0)), (0, 0, 255))
+
+        with self.page.expect_download() as downloaded:
+            self.page.locator("#save-workflow").click()
+        downloaded_path = self.fixture.root / "multiple-workflow.json"
+        downloaded.value.save_as(downloaded_path)
+        exported = json.loads(downloaded_path.read_text())
+        self.assertEqual(len(exported["workflow"]["conditional_loop"]["loops"]), 2)
+        self.page.locator("#load-workflow").set_input_files(downloaded_path)
+        expect(self.page.locator(".multiple-loop-card")).to_have_count(2)
+        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save")
+        second_id = exported["workflow"]["conditional_loop"]["loops"][1]["id"]
+        self.page.locator(".multiple-loop-card").first.get_by_role("button", name="删除循环", exact=True).click()
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].id"), second_id)
+        self.page.locator(".multiple-loop-card").first.get_by_role("button", name="删除循环", exact=True).click()
+        self.assertFalse(self.page.evaluate("Object.hasOwn(state.workflow, 'conditional_loop')"))
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.save.inputs.img2.node"), "generate_2")
+        self.assertEqual(self.errors, [])
+
+    def test_conditional_canvas_picker_selects_exact_instances_and_ports(self) -> None:
+        self.page.evaluate("""() => {
+            state.workflow = {nodes: {
+                original: {class_type: 'LoadTargetNode', inputs: {path: ''}},
+                generate: {class_type: 'FluxKleinReferenceNode', inputs: {reference_1: link('original', 'target'), seed: 0}},
+                generate_2: {class_type: 'FluxKleinReferenceNode', inputs: {reference_1: link('original', 'target'), seed: 7}},
+                score: {class_type: 'ColorSimilarityNode', inputs: {image1: link('generate', 'image'), image2: link('original', 'target')}},
+                score_2: {class_type: 'ColorSimilarityNode', inputs: {image1: link('generate_2', 'image'), image2: link('original', 'target')}},
+                save: {class_type: 'SaveImagesNode', inputs: {img1: link('generate', 'image'), dir: '/unused'}},
+                save_2: {class_type: 'SaveImagesNode', inputs: {img1: link('generate_2', 'image'), dir: '/unused2'}}
+            }, outputs: {}};
+            restoreLoop(); state.layout = {}; state.selected = null;
+            state.previewSession = 'historical-session';
+            state.nodeResults = {generate_2: {image: {kind: 'value', value: 'historical'}}};
+            render();
+        }""")
+        self.page.locator("#conditional-panel").evaluate("element => element.open = true")
+        self.page.locator("#conditional-legacy").click()
+        self.page.locator("#conditional-enabled").check()
+
+        def title(node_id: str):
+            return self.page.locator(f'.node[data-node-id="{node_id}"] .node-header')
+
+        self.page.get_by_role("button", name="画布点选保存终点", exact=True).click()
+        title("generate").click()
+        self.assertIsNone(self.page.evaluate("conditionalUI.targetId"))
+        expect(self.page.locator("#status")).to_contain_text("保存终点必须选择")
+        title("save_2").click()
+        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
+
+        self.page.get_by_role("button", name="画布增删循环起点", exact=True).click()
+        title("generate").click()
+        title("generate_2").click()
+        title("generate").click()
+        self.page.keyboard.press("Escape")
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.start_nodes"), ["generate_2"])
+        self.page.get_by_role("button", name="画布增删种子节点", exact=True).click()
+        title("generate_2").click()
+        self.page.get_by_role("button", name="完成点选 / 取消 (Esc)", exact=True).click()
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.seed_nodes"), ["generate_2"])
+
+        self.page.get_by_role("button", name="＋ 添加条件", exact=True).click()
+        self.page.get_by_label("条件 1 运算符", exact=True).select_option("<=")
+        threshold = self.page.get_by_label("条件 1 阈值", exact=True)
+        threshold.fill("10")
+        threshold.press("Tab")
+        bindings = self.page.evaluate("JSON.stringify(Object.fromEntries(Object.entries(state.workflow.nodes).map(([id, n]) => [id, n.inputs])))")
+        self.page.evaluate("state.connecting = {node: 'original', output: 'target'}")
+        self.page.get_by_role("button", name="画布点选条件 1 输出", exact=True).click()
+        self.page.locator('.port.output[data-node-id="generate_2"][data-port="image"]').click()
+        self.assertIsNotNone(self.page.evaluate("conditionalUI.picking"))
+        self.page.locator('.port.output[data-node-id="score_2"][data-port="score"]').click()
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.conditions"), [
+            {"node": "score_2", "output": "score", "operator": "<=", "value": 10}
+        ])
+        self.assertIsNone(self.page.evaluate("state.connecting"))
+        self.assertEqual(self.page.evaluate("JSON.stringify(Object.fromEntries(Object.entries(state.workflow.nodes).map(([id, n]) => [id, n.inputs])))"), bindings)
+        expect(title("generate_2").locator(".conditional-role")).to_contain_text("循环起点 · 递增种子")
+        expect(title("score_2").locator(".conditional-role")).to_contain_text("条件输出")
+        expect(title("save_2").locator(".conditional-role")).to_contain_text("保存终点")
+        expect(self.page.locator("#conditional-error")).to_have_text("")
+        self.assertEqual(self.page.evaluate("[...conditionalBody(state.workflow.conditional_loop, conditionalUI.targetId)]"), ["generate_2", "score_2"])
+
+        self.page.get_by_role("button", name=re.compile(r"^定位 score_2 ·")).click()
+        self.assertEqual(self.page.evaluate("state.selected"), "score_2")
+        expect(self.page.locator('.node[data-node-id="score_2"]')).to_have_class(re.compile(r"\bselected\b"))
+        self.assertEqual(self.page.evaluate("state.previewSession"), "historical-session")
+        self.assertTrue(self.page.evaluate("Boolean(state.nodeResults.generate_2)"))
+        self.page.evaluate("""() => {
+            const workflow = JSON.parse(JSON.stringify(state.workflow));
+            const settings = JSON.parse(JSON.stringify(loopSettings()));
+            state.workflow = workflow; restoreLoop(settings); render();
+        }""")
+        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
+        self.assertIsNone(self.page.evaluate("conditionalUI.picking"))
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.conditions[0].node"), "score_2")
+        self.assertEqual(self.errors, [])
+
+    def test_delete_node_button_cleans_links_outputs_and_preview(self) -> None:
+        self.page.evaluate("""() => {
+            state.workflow = {
+                nodes: {
+                    first: {class_type: 'BuildPromptNode', inputs: {object_name: 'cup'}},
+                    second: {class_type: 'BuildPromptNode', inputs: {object_name: {node: 'first', output: 'prompt'}}}
+                },
+                outputs: {prompt: {node: 'first', output: 'prompt'}}
+            };
+            state.selected = 'first';
+            state.connecting = {node: 'first', output: 'prompt'};
+            state.nodeResults = {first: {prompt: {kind: 'value', value: 'old output'}}};
+            restoreLoop(); render();
+        }""")
+        self.page.locator('.node[data-node-id="first"] .node-delete-button').click()
+        expect(self.page.locator('.node[data-node-id="first"]')).to_have_count(0)
+        expect(self.page.locator('.node[data-node-id="second"]')).to_have_count(1)
+        expect(self.page.locator("#status")).to_contain_text("已删除节点 first")
+        expect(self.page.locator("#status")).to_contain_text("second.object_name")
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.second.inputs.object_name"), None)
+        self.assertEqual(self.page.evaluate("state.workflow.outputs"), {})
+        self.assertEqual(self.page.evaluate("state.nodeResults"), {})
+        self.assertEqual(self.page.evaluate("state.connecting"), None)
+        self.assertEqual(self.errors, [])
+
+    def test_delete_shortcut_ignores_input_and_blocks_active_tasks(self) -> None:
+        self.page.locator('[data-starter="BuildPromptNode"]').click()
+        node_id = self.page.locator(".node").get_attribute("data-node-id")
+        field = self.page.locator('.node input[data-field="object_name"]')
+        field.focus()
+        self.page.keyboard.press("Delete")
+        expect(self.page.locator(".node")).to_have_count(1)
+        self.page.evaluate("document.activeElement.blur(); loopUI.busy = true; renderBatch();")
+        expect(self.page.locator(".node .node-delete-button")).to_be_disabled()
+        self.page.keyboard.press("Delete")
+        expect(self.page.locator(".node")).to_have_count(1)
+        self.page.evaluate("loopUI.busy = false; renderBatch();")
+        self.page.keyboard.press("Delete")
+        expect(self.page.locator(".node")).to_have_count(0)
+        expect(self.page.locator("#status")).to_contain_text(f"已删除节点 {node_id}")
+        self.assertEqual(self.errors, [])
+
+    def test_upstream_error_marks_original_node_and_clears_after_retry(self) -> None:
+        image_path = self.fixture.root / "error-colors.png"
+        mask_path = self.fixture.root / "error-mask.png"
+        Image.new("RGB", (32, 24), "red").save(image_path)
+        Image.new("L", (32, 24), 255).save(mask_path)
+        workflow = {
+            "nodes": {
+                "colors": {
+                    "class_type": "AutoColorRegionsNode",
+                    "inputs": {"image": str(image_path), "mask": str(mask_path), "detail": 3},
+                },
+                "select": {
+                    "class_type": "SelectColorRegionNode",
+                    "inputs": {"regions": {"node": "colors", "output": "regions"}},
+                },
+            },
+            "outputs": {},
+        }
+        path = self.fixture.root / "error-workflow.json"
+        path.write_text(json.dumps({"workflow": workflow}))
+        self.page.locator("#load-workflow").set_input_files(path)
+        expect(self.page.locator("#status")).to_contain_text("Imported workflow")
+        self.page.locator('.node[data-node-id="select"] .node-preview-button').click()
+        expect(self.page.locator("#status")).to_contain_text("请求节点 select")
+        expect(self.page.locator("#status")).to_contain_text("colors (AutoColorRegionsNode)")
+        expect(self.page.locator('.node[data-node-id="colors"]')).to_have_class(re.compile("node-failed"))
+        expect(self.page.locator('.node[data-node-id="select"]')).not_to_have_class(re.compile("node-failed"))
+        expect(self.page.locator("#node-preview .node-error")).to_contain_text("detail 必须")
+        detail = self.page.locator('.node[data-node-id="colors"] input[data-field="detail"]')
+        detail.fill("1")
+        detail.press("Enter")
+        self.page.locator('.node[data-node-id="select"] .node-preview-button').click()
+        expect(self.page.locator("#status")).to_contain_text("测试成功")
+        expect(self.page.locator(".node-failed")).to_have_count(0)
+        expect(self.page.locator(".node-error")).to_have_count(0)
+        expect(self.page.locator('#node-preview img[alt="mask"]')).to_have_count(1)
+        self.assertEqual(self.errors, [])
+
+    def test_swatch_dynamic_outputs_connect_score_save_and_shrink(self) -> None:
+        root = self.fixture.root
+        image_path, mask_path, reference_path = root / "dynamic-colors.png", root / "dynamic-mask.png", root / "red.png"
+        output = root / "dynamic-swatches"
+        image = Image.new("RGB", (16, 16), "red")
+        image.paste("blue", (0, 0, 4, 16))
+        image.paste("lime", (0, 0, 4, 4))
+        image.save(image_path)
+        Image.new("L", image.size, 255).save(mask_path)
+        Image.new("RGB", (32, 32), "red").save(reference_path)
+        workflow = {"nodes": {
+            "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": str(image_path), "mask": str(mask_path)}},
+            "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {
+                "regions": {"node": "regions", "output": "regions"}, "indices": [0]}},
+            "score": {"class_type": "ColorSimilarityNode", "inputs": {
+                "image1": {"node": "swatches", "output": "img1"}, "image2": str(reference_path)}},
+            "save": {"class_type": "SaveImagesNode", "inputs": {
+                "img1": {"node": "swatches", "output": "img1"}, "dir": str(output)}},
+        }, "outputs": {}}
+        saved = root / "dynamic-swatches.json"
+        saved.write_text(json.dumps({"workflow": workflow}))
+        self.page.locator("#load-workflow").set_input_files(saved)
+        expect(self.page.locator("#status")).to_contain_text("Imported workflow")
+        card = self.page.locator('.node[data-node-id="swatches"]')
+        expect(card.locator('.port.output[data-port^="img"]')).to_have_count(1)
+        expect(card.locator('.port.output[data-port="images"]')).to_have_count(0)
+        indices = card.locator('input[data-field="indices"]')
+        indices.fill("[0,2,1]")
+        indices.press("Enter")
+        expect(card.locator('.port.output[data-port^="img"]')).to_have_count(3)
+        card.locator('.port.output[data-port="img2"]').click()
+        self.page.locator('.node[data-node-id="save"] .port.input[data-port="img2"]').click()
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.save.inputs.img2"), {"node": "swatches", "output": "img2"})
+        card.locator(".node-preview-button").click()
+        expect(self.page.locator("#status")).to_contain_text("测试成功：swatches")
+        expect(self.page.locator('#node-preview img[alt^="img"]')).to_have_count(3)
+        self.page.locator('.node[data-node-id="score"] .node-preview-button').click()
+        expect(self.page.locator("#status")).to_contain_text("测试成功：score")
+        self.assertEqual(self.page.evaluate("state.nodeResults.score.score.value"), 0.0)
+        self.page.locator('.node[data-node-id="save"] .node-preview-button').click()
+        expect(self.page.locator("#status")).to_contain_text("保存成功")
+        self.assertEqual(len(list(output.rglob("*.png"))), 2)
+        for folder, color in (("img1", (255, 0, 0)), ("img2", (0, 255, 0))):
+            with Image.open(next((output / folder).glob("*.png"))) as image:
+                self.assertEqual(image.getcolors(), [(1024, color)])
+        session = self.page.evaluate("state.previewSession")
+        indices.fill("[0]")
+        indices.press("Enter")
+        expect(card.locator('.port.output[data-port^="img"]')).to_have_count(1)
+        self.assertIsNone(self.page.evaluate("state.workflow.nodes.save.inputs.img2"))
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.save.inputs.img1.output"), "img1")
+        self.assertEqual(self.page.evaluate("state.previewSession"), session)
+        self.assertEqual(self.page.evaluate("Object.keys(state.nodeResults.swatches).sort()"), ["colors", "img1", "img2", "img3"])
+        expect(card.locator(".preview-state")).to_contain_text("历史预览")
+        self.assertEqual(self.errors, [])
+
+    def test_color_region_swatches_list_input_preview_and_separate_save(self) -> None:
+        image_path = self.fixture.root / "swatch-image.png"
+        mask_path = self.fixture.root / "swatch-mask.png"
+        output = self.fixture.root / "swatch-output"
+        image = Image.new("RGB", (16, 16), "red")
+        image.paste("blue", (0, 0, 4, 16))
+        image.save(image_path)
+        Image.new("L", image.size, 255).save(mask_path)
+        workflow = {
+            "nodes": {
+                "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": str(image_path), "mask": str(mask_path)}},
+                "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {"regions": {"node": "regions", "output": "regions"}}},
+                "save": {"class_type": "SaveImagesNode", "inputs": {"images": {"node": "swatches", "output": "images"}, "dir": str(output)}},
+            },
+            "outputs": {},
+        }
+        path = self.fixture.root / "swatch-workflow.json"
+        path.write_text(json.dumps({"workflow": workflow}))
+        self.page.locator("#load-workflow").set_input_files(path)
+        expect(self.page.locator("#status")).to_contain_text("Imported workflow")
+        indices = self.page.locator('.node[data-node-id="swatches"] input[data-field="indices"]')
+        expect(indices).to_have_value("[0]")
+        indices.fill("[0,1]")
+        indices.press("Enter")
+        self.assertEqual(self.page.evaluate("state.workflow.nodes.swatches.inputs.indices"), [0, 1])
+        self.page.locator('.node[data-node-id="swatches"] .node-preview-button').click()
+        # Legacy consumers retain their list alongside the new individual ports.
+        expect(self.page.locator('#node-preview img[alt^="img"]')).to_have_count(2)
+        expect(self.page.locator("#node-preview .composite-output img")).to_have_count(2)
+        self.assertTrue(self.page.evaluate("state.workflow.nodes.swatches.legacy_swatch_images"))
+        expect(self.page.locator("#node-preview")).to_contain_text("32 × 32 RGB")
+        self.assertFalse(output.exists())
+        self.page.locator('.node[data-node-id="save"] .node-preview-button').click()
+        expect(self.page.locator("#status")).to_contain_text("保存成功")
+        self.assertEqual(len(list(output.rglob("*.png"))), 2)
+        for folder, color in (("images_0", (255, 0, 0)), ("images_1", (0, 0, 255))):
+            with Image.open(next((output / folder).glob("*.png"))) as saved:
+                self.assertEqual((saved.size, saved.mode), ((32, 32), "RGB"))
+                self.assertEqual(saved.getcolors(), [(1024, color)])
+        self.assertEqual(self.errors, [])
+
     def test_auto_color_regions_upload_gallery_and_invalid_detail(self) -> None:
         image = Image.new("RGB", (32, 24), "red")
         image.paste("blue", (16, 0, 32, 24))
@@ -271,6 +669,50 @@ class StudioBrowserTests(unittest.TestCase):
         expect(self.page.locator("#status")).to_contain_text("保存成功")
         self.assertEqual(len(list((directory / "img3").glob("*.png"))), 1)
         self.assertFalse((directory / "img1").exists())
+        self.assertEqual(self.errors, [])
+
+    def test_dynamic_save_items_name_upload_delete_and_workflow_round_trip(self) -> None:
+        self.page.locator('[data-starter="SaveImagesNode"]').click()
+        add = self.page.locator(".node .save-item-add")
+        expect(add).to_be_enabled()
+        for _ in range(4):
+            add.click()
+        expect(self.page.locator(".node input[data-save-name]")).to_have_count(8)
+        name = self.page.locator('.node input[data-save-name="img8"]')
+        name.fill("透明参考图")
+        name.press("Enter")
+        self.page.get_by_role("button", name="移除保存项 img2", exact=True).click()
+        add.click()
+        expect(self.page.locator('.node input[data-save-name="img2"]')).to_have_count(0)
+        expect(self.page.locator('.node input[data-save-name="img9"]')).to_have_count(1)
+        directory = self.fixture.root / "dynamic-save"
+        field = self.page.locator('.node input[data-field="dir"]')
+        field.fill(str(directory))
+        field.press("Enter")
+        filename = self.page.locator('.node input[data-field="filename"]')
+        filename.fill("sample.jpg")
+        filename.press("Enter")
+        self.page.locator('.node input[data-upload="img8"]').set_input_files(self.fixture.root / "target.png")
+        expect(self.page.locator('.node input[data-field="img8"]')).to_have_value(re.compile(".*studio-uploads-.*"))
+        self.page.locator(".node-preview-button").click()
+        expect(self.page.locator("#status")).to_contain_text("保存成功")
+        self.assertTrue((directory / "透明参考图" / "sample.png").is_file())
+        self.assertFalse((directory / "img1").exists())
+        with self.page.expect_download() as event:
+            self.page.locator("#save-workflow").click()
+        saved = self.fixture.root / "dynamic-workflow.json"
+        event.value.save_as(saved)
+        spec = next(iter(json.loads(saved.read_text())["workflow"]["nodes"].values()))
+        self.assertEqual(spec["save_next_id"], 10)
+        self.assertNotIn("img2", spec["inputs"])
+        self.assertEqual(next(item["name"] for item in spec["save_items"] if item["id"] == "img8"), "透明参考图")
+        self.page.locator("#new-workflow").click()
+        self.page.locator("#load-workflow").set_input_files(saved)
+        expect(self.page.locator("#status")).to_contain_text("Imported workflow")
+        expect(self.page.locator('.node input[data-save-name="img8"]')).to_have_value("透明参考图")
+        expect(self.page.locator('.node input[data-save-name="img2"]')).to_have_count(0)
+        self.page.locator(".node .save-item-add").click()
+        expect(self.page.locator('.node input[data-save-name="img10"]')).to_have_count(1)
         self.assertEqual(self.errors, [])
 
     def test_folder_batch_runs_and_downloads_source_to_saved_path_report(self):
@@ -576,7 +1018,7 @@ class StudioBrowserTests(unittest.TestCase):
         expect(self.page.locator('.node[data-node-id="target"] .node-output-view img')).to_have_count(1)
         self.assertEqual(self.errors, [])
 
-    def test_prompt_practice_displays_text_and_invalidates_old_output(self):
+    def test_prompt_practice_retains_historical_output_until_retest(self):
         self.page.locator('[data-starter="BuildPromptNode"]').click()
         expect(self.page.locator(".node")).to_have_count(1)
         expect(self.page.locator("#node-help")).to_contain_text("不需要任何图片")
@@ -586,10 +1028,64 @@ class StudioBrowserTests(unittest.TestCase):
         field = self.page.locator('.node input[data-field="object_name"]')
         field.fill("bag")
         field.press("Enter")
-        expect(self.page.locator("#node-preview pre")).to_have_count(0)
+        expect(self.page.locator("#node-preview")).to_contain_text("Restore the cup")
+        expect(self.page.locator("#node-preview .preview-state")).to_contain_text("历史预览")
         self.page.locator(".node-preview-button").click()
         expect(self.page.locator("#node-preview")).to_contain_text("Restore the bag")
         expect(self.page.locator("#status")).to_contain_text("实际执行：buildprompt")
+        self.assertEqual(self.errors, [])
+
+    def test_flux_then_edit_save_reuses_model_and_keeps_preview_until_hidden(self):
+        if os.environ.get("STUDIO_TEST_URL"):
+            self.skipTest("CPU model substitute requires the in-process test server")
+        output = self.fixture.root / "edited-save-output"
+        workflow = {"nodes": {
+            "input": {"class_type": "LoadTargetNode", "inputs": {
+                "path": str(self.fixture.root / "target.png"),
+            }},
+            "flux": {"class_type": "FluxKleinReferenceNode", "inputs": {
+                "prompt": "CPU regression substitute", "reference_1": {"node": "input", "output": "target"},
+            }},
+            "save": {"class_type": "SaveImagesNode", "inputs": {
+                "img1": {"node": "flux", "output": "image"},
+                "dir": str(self.fixture.root / "before-edit"),
+            }},
+        }, "outputs": {}}
+        with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", return_value={
+            "image": Image.new("RGB", (16, 16), (12, 34, 56)),
+        }) as model:
+            self.page.evaluate("""workflow => {
+                startPractice(); state.workflow = workflow;
+                state.layout = {input: {x: 30, y: 30}, flux: {x: 350, y: 30}, save: {x: 680, y: 30}};
+                render();
+            }""", workflow)
+            flux = self.page.locator('.node[data-node-id="flux"]')
+            flux.locator(".node-preview-button").click()
+            expect(self.page.locator("#status")).to_contain_text("测试成功：flux")
+            expect(flux.locator(".preview-body img")).to_be_visible()
+            save = self.page.locator('.node[data-node-id="save"]')
+            save.locator('input[data-field="dir"]').fill(str(output))
+            save.locator('input[data-field="dir"]').press("Enter")
+            save.locator('input[data-save-name="img1"]').fill("generated")
+            save.locator('input[data-save-name="img1"]').press("Enter")
+            expect(flux.locator(".preview-body img")).to_be_visible()
+            save.locator(".node-preview-button").click()
+            expect(self.page.locator("#status")).to_contain_text("保存成功：save")
+            expect(self.page.locator("#status")).to_contain_text("复用上游")
+            self.assertEqual(model.call_count, 1)
+            expect(flux.locator(".preview-body img")).to_be_visible()
+            saved = list((output / "generated").glob("*.png"))
+            self.assertEqual(len(saved), 1)
+            with Image.open(saved[0]) as image:
+                self.assertEqual(image.getpixel((0, 0)), (12, 34, 56))
+            flux.locator(".preview-toggle").click()
+            expect(flux.locator(".preview-body")).to_be_hidden()
+            # A full UI re-render must not reopen an explicitly hidden preview.
+            self.page.evaluate("render()")
+            expect(flux.locator(".preview-body")).to_be_hidden()
+            flux.locator(".preview-toggle").click()
+            expect(flux.locator(".preview-body img")).to_be_visible()
+            self.assertEqual(model.call_count, 1)
         self.assertEqual(self.errors, [])
 
     def test_target_practice_file_button_and_image_zoom(self):

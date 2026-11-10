@@ -172,7 +172,9 @@ class ObjectInpaintingDatasetTests(unittest.TestCase):
         output = self.root / "dataset"
         with self.assertRaisesRegex(ValueError, "No usable samples"):
             build_dataset(self.manifest, output, self.config)
-        self.assertEqual(json.loads((output / "rejected.jsonl").read_text())["reason"], "Instance mask is empty.")
+        reason = json.loads((output / "rejected.jsonl").read_text())["reason"]
+        self.assertIn("Instance mask is empty.", reason)
+        self.assertIn("selection (SelectObjectNode)", reason)
 
     def test_cli_creates_dataset(self):
         entrypoint = Path(__file__).resolve().parents[1] / "build_object_inpainting_dataset.py"

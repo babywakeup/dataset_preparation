@@ -6,6 +6,8 @@ from threading import Lock
 
 from PIL import Image, ImageOps
 
+from ..node_contracts import FluxKleinReferenceInputs, FluxKleinReferenceOutputs
+from ..port_types import OptionalReferenceImage
 from .base import Node
 
 
@@ -23,7 +25,7 @@ def get_flux_klein(model: str, device: str):
     dtype = torch.float32 if device == "cpu" else torch.bfloat16
     pipeline = Flux2KleinPipeline.from_pretrained(
         model,
-        dtype=dtype,
+        torch_dtype=dtype,
         cache_dir=str(CACHE_DIR),
         local_files_only=True,
     )
@@ -31,18 +33,8 @@ def get_flux_klein(model: str, device: str):
 
 
 class FluxKleinReferenceNode(Node):
-    INPUT_TYPES = {
-        "prompt": "STRING",
-        "reference_1": "RGB_IMAGE",
-        "reference_2": "RGB_IMAGE",
-        "reference_3": "RGB_IMAGE",
-        "width": "INT",
-        "height": "INT",
-        "num_inference_steps": "INT",
-        "guidance_scale": "FLOAT",
-        "seed": "INT",
-    }
-    OUTPUT_TYPES = {"image": "RGB_IMAGE"}
+    INPUT_SCHEMA = FluxKleinReferenceInputs
+    OUTPUT_SCHEMA = FluxKleinReferenceOutputs
     CATEGORY = "dataset"
     OPTIONAL_INPUTS = {"reference_1", "reference_2", "reference_3"}
     INPUT_DEFAULTS = {"width": 1024, "height": 1024, "num_inference_steps": 28, "guidance_scale": 4.0, "seed": 0}
@@ -50,15 +42,15 @@ class FluxKleinReferenceNode(Node):
     def execute(
         self,
         prompt: str,
-        reference_1=None,
-        reference_2=None,
-        reference_3=None,
-        width=1024,
-        height=1024,
-        num_inference_steps=28,
-        guidance_scale=4.0,
-        seed=0,
-    ) -> dict:
+        reference_1: OptionalReferenceImage = None,
+        reference_2: OptionalReferenceImage = None,
+        reference_3: OptionalReferenceImage = None,
+        width: int = 1024,
+        height: int = 1024,
+        num_inference_steps: int = 28,
+        guidance_scale: float = 4.0,
+        seed: int = 0,
+    ) -> FluxKleinReferenceOutputs:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Prompt 不能为空。")
         prompt = prompt.strip()

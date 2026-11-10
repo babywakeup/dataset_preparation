@@ -8,6 +8,8 @@ from threading import Lock
 import numpy as np
 from PIL import Image
 
+from ..node_contracts import SAM2MaskInputs, SAM2MaskOutputs
+from ..port_types import FloatBoundingBox, RGBImage
 from .base import Node
 
 
@@ -26,11 +28,15 @@ def get_sam2(device: str):
 
 
 class SAM2MaskNode(Node):
-    INPUT_TYPES = {"image": "RGB_IMAGE", "bbox": "BBOX"}
-    OUTPUT_TYPES = {"object_mask": "MASK", "quality": "STRING"}
+    INPUT_SCHEMA = SAM2MaskInputs
+    OUTPUT_SCHEMA = SAM2MaskOutputs
     CATEGORY = "dataset"
 
-    def execute(self, image: Image.Image, bbox) -> dict:
+    def execute(
+        self,
+        image: RGBImage,
+        bbox: FloatBoundingBox,
+    ) -> SAM2MaskOutputs:
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
             raise ValueError("物体框必须是 [左, 上, 右, 下]。")
         if any(isinstance(value, bool) or not isinstance(value, Real) for value in bbox):

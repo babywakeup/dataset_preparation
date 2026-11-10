@@ -179,22 +179,41 @@ NODE_HELP = {
     },
     "SAM3TextMaskNode": {
         "title": "SAM3 文本分割物体",
-        "summary": "用简短英文文本指定物体，无需填写框；仅加载 ModelScope 下载的本地 SAM3，不联网下载权重。",
+        "summary": "用简短英文文本分割单个物体，可调阈值；仅加载本地 SAM3，不联网下载权重。不执行膨胀。",
         "inputs": {
             "image": "待分割图片，可直接选择图片，或连接读取原图/裁剪节点。",
             "text": "要分割的物体，例如 cup、red bag、truck；不是图片生成指令。",
+            "threshold": "物体置信度阈值，0～1，默认 0.5；降低可保留较低置信度匹配，不保证扩大物体区域。",
+            "mask_threshold": "像素 Mask 阈值，0～1，默认 0.5；适当降低可保留较不确定的边缘，也可能引入背景。",
         },
         "outputs": {
-            "object_mask": "与输入图同尺寸的黑白 Mask，白色为选中的单个物体，黑色为背景。",
-            "bbox": "从选中 Mask 计算的整数框 [左, 上, 右, 下]，右和下不包含，可直接连接 Crop 节点。",
-            "quality": "匹配数量、选中物体的预测置信度；不是实测准确率，不会合并多个物体。",
+            "object_mask": "与输入图同尺寸的原始二值分割 Mask；需要扩大时连接独立 MaskDilationNode。",
+            "bbox": "原始分割 Mask 的整数框 [左, 上, 右, 下]，右和下不包含；不是膨胀后的框。",
+            "quality": "匹配数量、原始模型预测置信度和实际阈值；不是实测准确率。",
         },
         "test": (
             "选图、填写简短英文物体名，然后测试。默认读取 ../hf_cache/sam3；"
             "可用 OBJECT_INPAINTING_SAM3_MODEL_DIR 指定模型目录。"
-            "置信度阈值为 0.5；匹配多个物体时只保留置信度最高的一个。"
+            "两项阈值默认为 0.5；匹配多个物体时只保留置信度最高的一个。"
+            "Mask 太小时请连接独立 Mask 膨胀节点；抠图分支可以继续使用未膨胀的原始分割。"
             "优先 CUDA，OBJECT_INPAINTING_SAM3_DEVICE 可指定 cpu 或逻辑 cuda:0。首次加载需要等待。"
         ),
+        "parameters": [],
+    },
+    "MaskDilationNode": {
+        "title": "Mask 膨胀（独立）",
+        "summary": "纯 CPU 扩展任意黑白 / 灰度 Mask，无需模型或全局配置；同时输出最终边界框。",
+        "inputs": {
+            "mask": "黑白 / 灰度 Mask，可连接 SAM2、SAM3、颜色分区或读取 Mask；不是 RGB 图。",
+            "dilation_steps": "膨胀次数，非负整数；默认 1，0 表示关闭。",
+            "dilation_kernel": "方形核边长（当前 Mask 像素），必须为正奇数；默认 3，1 不扩展，可用 5、11。",
+        },
+        "outputs": {
+            "mask": "同尺寸 L 模式膨胀 Mask；二值输入保持二值，灰度输入保留灰度。不改动输入图。",
+            "bbox": "最终 Mask 非零区域的框 [左, 上, 右, 下]，右 / 下不包含；空 Mask 为 [0, 0, 0, 0]，不能用于非空裁剪。",
+            "quality": "膨胀次数、核大小及前后非零面积，不是模型质量分数。",
+        },
+        "test": "接入 Mask 后测试；建议先设 dilation_steps=2、dilation_kernel=11，最多向四边各扩展 10 像素。编辑分支接膨胀 Mask，参考抠图可继续接原始 Mask。注意不要覆盖无关物体。",
         "parameters": [],
     },
     "MaskToRGBANode": {
@@ -245,14 +264,16 @@ NODE_HELP = {
 }
 
 NODE_HELP["SaveImagesNode"] = {
-    "title": "保存最多四张图片",
-    "summary": "将 img1～img4 分别保存到 dir 下同名子目录；空输入跳过，同一组图片使用相同编号。",
+    "title": "保存图片 / 动态保存项",
+    "summary": "默认四项，点击「＋添加图片」可增加到八项或更多；每项可命名子目录，空输入跳过，同一组共享文件名。",
     "inputs": {
         "img1": "第一张图片，保存到 img1 子目录；可连接 RGB、RGBA 或 Mask，也可上传。",
         "img2": "第二张图片，保存到 img2 子目录；可为空，不会重新编号。",
         "img3": "第三张图片，保存到 img3 子目录；可为空。",
         "img4": "第四张图片，保存到 img4 子目录；可为空。",
+        "images": "IMAGE_LIST：连接颜色色块等节点的 images 输出；按列表顺序分别保存到 images_0、images_1 等子目录，每项单独一张 PNG。可与 img1～img4 同时保存。",
         "dir": "服务器上的保存根目录，支持绝对路径或相对于服务工作目录的路径。",
+        "filename": "可选整组文件名，可连接文件夹节点 filename；去掉最后一个扩展名后统一保存为 PNG。留空使用同轮随机编号，已有文件报错且不覆盖。每项旁的名称只决定子目录，不改变连线 ID。",
     },
     "outputs": {"paths": "本次实际保存的图片路径；PNG 保留原尺寸、RGB、透明通道或灰度 Mask。"},
     "test": "连接或上传至少一张图片，填写 dir，再点击“仅保存当前张 · 不循环”。这只保存当前一组；处理整个文件夹请开启“↻ 逐张”，再点击画布顶部“运行全部 · 写入磁盘”。每次保存使用新编号。",
@@ -314,6 +335,35 @@ NODE_HELP["SelectColorRegionNode"] = {
         "rgba": "RGBA_IMAGE：与原图同尺寸，区域内保留原 RGB，区域外透明。",
     },
     "test": "先测试自动分色节点并查看右侧区域卡片，将 regions 连接到这里，填写 region_id 后测试。预览不会写文件，保存请连接 SaveImagesNode。",
+    "parameters": [],
+}
+
+NODE_HELP["ColorRegionSwatchesNode"] = {
+    "title": "提取区域颜色 · 32×32",
+    "summary": "按面积排名索引列表提取平均 RGB，每种颜色生成一张独立的 32×32 纯色图，不是原图抠图或伪彩色。",
+    "inputs": {
+        "regions": "COLOR_REGIONS：连接自动颜色分区节点的 regions 输出。",
+        "indices": "INT_LIST：直接填写从 0 开始的面积排名列表。[0,2,1] 生成 img1～img3，分别对应这三个排名；默认 [0]。不能连线，允许重复索引。",
+    },
+    "outputs": {
+        "img1": "RGB_IMAGE：indices 第一个索引对应的独立 32×32 纯色图；列表有 N 项就提供 img1～imgN，可分别连接评分 / 保存节点。",
+        "colors": "JSON_RECORD：所选 0-based 索引、原 1-based 区域 ID、平均 RGB、区域面积比例和色块尺寸。",
+    },
+    "test": "将自动分色的 regions 接入，indices 填 [0,1] 并按 Enter，出现 img1、img2 两个独立输出；可各接 ColorSimilarityNode 或保存项。缩短列表会断开已移除端口，重排会改变存续端口内容。旧 images 连线保留兼容；新节点不输出列表。当前图缺少所选排名会明确报错。",
+    "parameters": [],
+}
+
+NODE_HELP["ColorSimilarityNode"] = {
+    "title": "颜色相似度评估 (CIEDE2000)",
+    "summary": "基于 skimage.color.deltaE_ciede2000 评估两张纯色 RGB 图片的颜色相似度，输出 CIEDE2000 色差得分（越小越相似）。",
+    "inputs": {
+        "image1": "RGB_IMAGE：第一张纯色 RGB 图片。",
+        "image2": "RGB_IMAGE：第二张纯色 RGB 图片。",
+    },
+    "outputs": {
+        "score": "FLOAT：CIEDE2000 色差得分；完全一致时为 0.0，值越小越相似，sRGB 范围最大约 119.03。",
+    },
+    "test": "连接两张纯色 RGB 图片（例如由色块提取节点生成的 32×32 色块），测试评估两者的颜色差异得分。",
     "parameters": [],
 }
 

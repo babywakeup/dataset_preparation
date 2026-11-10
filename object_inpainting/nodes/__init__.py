@@ -3,6 +3,8 @@ from .assemble_sample import AssembleSampleNode
 from .auto_color_regions import AutoColorRegionsNode
 from .base import Node
 from .build_prompt import BuildPromptNode
+from .color_region_swatches import ColorRegionSwatchesNode
+from .color_similarity import ColorSimilarityNode
 from .crop import CropNode
 from .expand_mask import ExpandMaskNode
 from .extract_reference import ExtractReferenceNode
@@ -12,6 +14,7 @@ from .folder_images import FolderImagesNode
 from .gray_mask import GrayMaskNode
 from .load_instance_mask import LoadInstanceMaskNode
 from .load_target import LoadTargetNode
+from .mask_dilation import MaskDilationNode
 from .mask_to_rgba import MaskToRGBANode
 from .record_input import RecordInputNode
 from .rgba_to_white_background import RGBAToWhiteBackgroundNode
@@ -46,6 +49,7 @@ NODE_CLASS_MAPPINGS = {
         CropNode,
         SAM2MaskNode,
         SAM3TextMaskNode,
+        MaskDilationNode,
         MaskToRGBANode,
         RGBAToWhiteBackgroundNode,
         FluxKleinReferenceNode,
@@ -54,5 +58,7 @@ NODE_CLASS_MAPPINGS = {
         FolderImagesNode,
         AutoColorRegionsNode,
         SelectColorRegionNode,
+        ColorRegionSwatchesNode,
+        ColorSimilarityNode,
     )
 }

@@ -1,16 +1,19 @@
+from ..node_contracts import AssembleSampleInputs, SampleOutputs
+from ..port_types import MaskedRGBImage, MaskImage, ReferenceRGBImage, RGBImage
 from ..quality import PreparedSample
 from .base import Node
 
 
 class AssembleSampleNode(Node):
-    INPUT_TYPES = {
-        "target": "RGB_IMAGE",
-        "source": "RGB_IMAGE",
-        "edit_mask": "MASK",
-        "reference": "RGB_IMAGE",
-        "prompt": "STRING",
-    }
-    OUTPUT_TYPES = {"sample": "PREPARED_SAMPLE"}
+    INPUT_SCHEMA = AssembleSampleInputs
+    OUTPUT_SCHEMA = SampleOutputs
 
-    def execute(self, target, source, edit_mask, reference, prompt):
+    def execute(
+        self,
+        target: RGBImage,
+        source: MaskedRGBImage,
+        edit_mask: MaskImage,
+        reference: ReferenceRGBImage,
+        prompt: str,
+    ) -> SampleOutputs:
         return {"sample": PreparedSample(target, source, edit_mask, reference, prompt)}

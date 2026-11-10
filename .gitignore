@@ -32,3 +32,4 @@ temp_rgba.png
 .DS_Store
 *.swp
 *.swo
+/test/

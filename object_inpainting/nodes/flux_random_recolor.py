@@ -1,11 +1,12 @@
 import random
 import secrets
-from typing import TypedDict
 
 import numpy as np
 from PIL import Image, ImageOps
 
 from ..masking import make_source
+from ..node_contracts import FluxRandomRecolorInputs, RandomRecolorOutputs as RandomRecolorOutputs
+from ..port_types import MaskedRGBImage, RGBImage
 from .base import Node
 from .flux_klein_reference import FluxKleinReferenceNode
 
@@ -28,18 +29,6 @@ RECOLOR_PALETTE = (
     ("cream", (224, 216, 184)),
     ("charcoal gray", (72, 80, 88)),
 )
-
-
-class RandomRecolorOutputs(TypedDict):
-    """随机换色输出；sampled_color 是新 source 的颜色条件，不是恢复原 target 的训练条件。"""
-
-    source: Image.Image
-    masked_source: Image.Image
-    mask: Image.Image
-    sampled_color: Image.Image
-    color_name: str
-    actual_seed: int
-    generation_prompt: str
 
 
 def choose_recolor(image: Image.Image, mask: Image.Image, seed: int) -> tuple[str, tuple[int, int, int]]:
@@ -97,29 +86,15 @@ def recover_recolor_mask(target: Image.Image, masked_target: Image.Image) -> Ima
 class FluxRandomRecolorNode(Node):
     """真实调用 FLUX.2 Klein 随机修改指定衣服区域的颜色，用于反向构造 source。"""
 
-    INPUT_TYPES = {
-        "target": "RGB_IMAGE",
-        "mask": "RGB_IMAGE",
-        "seed": "INT",
-        "num_inference_steps": "INT",
-        "guidance_scale": "FLOAT",
-    }
+    INPUT_SCHEMA = FluxRandomRecolorInputs
     INPUT_DEFAULTS = {"seed": -1, "num_inference_steps": 28, "guidance_scale": 4.0}
-    OUTPUT_TYPES = {
-        "source": "RGB_IMAGE",
-        "masked_source": "RGB_IMAGE",
-        "mask": "MASK",
-        "sampled_color": "RGB_IMAGE",
-        "color_name": "STRING",
-        "actual_seed": "INT",
-        "generation_prompt": "STRING",
-    }
+    OUTPUT_SCHEMA = RandomRecolorOutputs
     CATEGORY = "dataset"
 
     def execute(
         self,
-        target: Image.Image,
-        mask: Image.Image,
+        target: RGBImage,
+        mask: MaskedRGBImage,
         seed: int = -1,
         num_inference_steps: int = 28,
         guidance_scale: float = 4.0,

@@ -1,19 +1,19 @@
-from PIL import Image
-
-from ..color_regions import ColorRegionOutputs, render_color_regions, segment_colors
+from ..color_regions import render_color_regions, segment_colors
+from ..node_contracts import AutoColorRegionsInputs, ColorRegionOutputs
+from ..port_types import MaskImage, RGBImage
 from .base import Node
 
 
 class AutoColorRegionsNode(Node):
     """在输入 Mask 内自动分色，固定输出端口，不需要预先指定主色数量。"""
 
-    INPUT_TYPES = {"image": "RGB_IMAGE", "mask": "MASK", "detail": "INT"}
+    INPUT_SCHEMA = AutoColorRegionsInputs
     INPUT_DEFAULTS = {"detail": 1}
-    OUTPUT_TYPES = {"regions": "COLOR_REGIONS", "overlay": "RGB_IMAGE", "palette": "RGB_IMAGE", "labels": "LABEL_MAP"}
+    OUTPUT_SCHEMA = ColorRegionOutputs
     CATEGORY = "dataset"
     PRESERVE_MASK_VALUES = True
 
-    def execute(self, image: Image.Image, mask: Image.Image, detail: int = 1) -> ColorRegionOutputs:
+    def execute(self, image: RGBImage, mask: MaskImage, detail: int = 1) -> ColorRegionOutputs:
         """接收 RGB image、同尺寸 1/L mask 和 0/1/2 精细度，返回四个固定类型输出。
 
         Args:

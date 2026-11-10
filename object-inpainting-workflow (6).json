@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "workflow": {
+    "nodes": {
+      "folder": {
+        "class_type": "FolderImagesNode",
+        "inputs": {
+          "dir": "",
+          "recursive": 0,
+          "index": 0
+        }
+      },
+      "loadtarget": {
+        "class_type": "LoadTargetNode",
+        "inputs": {
+          "path": "/tmp/object-inpainting-studio-uploads-kwsduw5z/9c8499ae7f194316abed91a561018c1f.png"
+        }
+      },
+      "sam3textmask": {
+        "class_type": "SAM3TextMaskNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "text": "cloth",
+          "threshold": 0.5,
+          "mask_threshold": 0.5
+        }
+      },
+      "masktorgba": {
+        "class_type": "MaskToRGBANode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "maskdilation",
+            "output": "mask"
+          }
+        }
+      },
+      "rgbatowhitebackground": {
+        "class_type": "RGBAToWhiteBackgroundNode",
+        "inputs": {
+          "rgba": {
+            "node": "masktorgba",
+            "output": "rgba"
+          }
+        }
+      },
+      "fluxkleinreference": {
+        "class_type": "FluxKleinReferenceNode",
+        "inputs": {
+          "prompt": "Create a clean e-commerce flat-lay product photograph of the exact garment shown in reference image 2. Use reference image 1 only to recover visible garment details.  Show only this single garment laid flat on a pure white surface, photographed directly from above. Arrange it neatly in a natural, relaxed shape, with the front side facing upward. Show the entire garment, centered in the frame with even white margins. Lay sleeves and other garment parts naturally without overlapping or hiding important details.  Preserve the garment's original color, fabric texture, pattern, proportions, neckline, seams, buttons, pockets, and visible logos or text. Do not redesign the garment.  No person, body parts, mannequin, hanger, accessories, or other garments. No standing or floating presentation. Use soft, even studio lighting with subtle natural contact shadows. No added text, props, borders, or watermarks.",
+          "reference_1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "reference_2": {
+            "node": "rgbatowhitebackground",
+            "output": "rgb"
+          },
+          "reference_3": null,
+          "width": 1024,
+          "height": 1024,
+          "num_inference_steps": 8,
+          "guidance_scale": 4,
+          "seed": 0
+        }
+      },
+      "graymask": {
+        "class_type": "GrayMaskNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "edit_mask": {
+            "node": "maskdilation",
+            "output": "mask"
+          }
+        }
+      },
+      "save": {
+        "class_type": "SaveImagesNode",
+        "inputs": {
+          "img1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "img2": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "img3": {
+            "node": "maskdilation",
+            "output": "mask"
+          },
+          "img4": {
+            "node": "fluxkleinreference",
+            "output": "image"
+          },
+          "dir": "./test",
+          "images": {
+            "node": "colorregionswatches",
+            "output": "images"
+          },
+          "filename": "",
+          "img5": null
+        },
+        "save_items": [
+          {
+            "id": "img1",
+            "name": "原图"
+          },
+          {
+            "id": "img2",
+            "name": "经过涂灰的原图"
+          },
+          {
+            "id": "img3",
+            "name": "膨胀后的mask"
+          },
+          {
+            "id": "img4",
+            "name": "原图身上的图_生成_平铺图"
+          },
+          {
+            "id": "img5",
+            "name": ""
+          }
+        ],
+        "save_next_id": 6
+      },
+      "autocolorregions": {
+        "class_type": "AutoColorRegionsNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "detail": 1
+        }
+      },
+      "colorregionswatches": {
+        "class_type": "ColorRegionSwatchesNode",
+        "inputs": {
+          "regions": {
+            "node": "autocolorregions",
+            "output": "regions"
+          },
+          "indices": [
+            0
+          ]
+        }
+      },
+      "fluxrandomrecolor": {
+        "class_type": "FluxRandomRecolorNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "seed": -1,
+          "num_inference_steps": 28,
+          "guidance_scale": 4
+        }
+      },
+      "maskdilation": {
+        "class_type": "MaskDilationNode",
+        "inputs": {
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "dilation_steps": 3,
+          "dilation_kernel": 25
+        }
+      },
+      "fluxrandomrecolor_2": {
+        "class_type": "FluxRandomRecolorNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "seed": -1,
+          "num_inference_steps": 8,
+          "guidance_scale": 4
+        }
+      },
+      "autocolorregions_2": {
+        "class_type": "AutoColorRegionsNode",
+        "inputs": {
+          "image": {
+            "node": "fluxrandomrecolor_2",
+            "output": "source"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "detail": 1
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "layout": {
+    "folder": {
+      "x": 50,
+      "y": 60
+    },
+    "loadtarget": {
+      "x": 410,
+      "y": 60
+    },
+    "sam3textmask": {
+      "x": 41.33331298828125,
+      "y": 896.0000610351562
+    },
+    "masktorgba": {
+      "x": 1634,
+      "y": 64
+    },
+    "rgbatowhitebackground": {
+      "x": 2254,
+      "y": 56
+    },
+    "fluxkleinreference": {
+      "x": 3275,
+      "y": 250
+    },
+    "graymask": {
+      "x": 1412,
+      "y": 654
+    },
+    "save": {
+      "x": 4709,
+      "y": 792
+    },
+    "autocolorregions": {
+      "x": 1165.0001220703125,
+      "y": 1421.8333435058594
+    },
+    "colorregionswatches": {
+      "x": 1589.33349609375,
+      "y": 1504.3334045410156
+    },
+    "fluxrandomrecolor": {
+      "x": 2119.6666870117188,
+      "y": 421
+    },
+    "maskdilation": {
+      "x": 515,
+      "y": 917.5
+    },
+    "fluxrandomrecolor_2": {
+      "x": 2584,
+      "y": 1362.5
+    },
+    "autocolorregions_2": {
+      "x": 3045,
+      "y": 1611
+    }
+  },
+  "config": {
+    "resolution": 1024,
+    "reference_resolution": 512,
+    "dilation_radius": 4,
+    "reference_padding": 0.1,
+    "min_object_fraction": 0.01,
+    "max_object_fraction": 0.6,
+    "validation_fraction": 0.1,
+    "seed": 42
+  },
+  "loop": {
+    "sourceId": "folder",
+    "targetId": null,
+    "enabled": false
+  }
+}

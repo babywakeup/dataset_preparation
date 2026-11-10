@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export CUDA_VISIBLE_DEVICES=1
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="${OBJECT_INPAINTING_STUDIO_PYTHON:-$SCRIPT_DIR/../../.venv/bin/python}"
+PYTHON="${OBJECT_INPAINTING_STUDIO_PYTHON:-$SCRIPT_DIR/../.venv/bin/python}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Python executable is not executable: $PYTHON" >&2
@@ -11,8 +11,8 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-export HF_HOME="$(cd -- "$SCRIPT_DIR/../../.." && pwd)/hf_cache"
-export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_HOME="${HF_HOME:-$(cd -- "$SCRIPT_DIR/../.." && pwd)/hf_cache}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}}"
 export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
-export HF_XET_CACHE="$HF_HOME/xet"
+export HF_XET_CACHE="${HF_XET_CACHE:-$HF_HOME/xet}"
 exec "$PYTHON" -m object_inpainting_studio "$@"

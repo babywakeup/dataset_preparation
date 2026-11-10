@@ -1,15 +1,17 @@
 import json
 from pathlib import Path
 
+from ..node_contracts import WriteJsonlInputs, WriteJsonlOutputs
+from ..port_types import FilePath, JsonRecord
 from .base import Node
 
 
 class WriteJsonlNode(Node):
     SIDE_EFFECTS = True
-    INPUT_TYPES = {"entry": "JSON_RECORD", "path": "PATH"}
-    OUTPUT_TYPES = {"entry": "JSON_RECORD"}
+    INPUT_SCHEMA = WriteJsonlInputs
+    OUTPUT_SCHEMA = WriteJsonlOutputs
 
-    def execute(self, entry, path):
+    def execute(self, entry: JsonRecord, path: FilePath) -> WriteJsonlOutputs:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
