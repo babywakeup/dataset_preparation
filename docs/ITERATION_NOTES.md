@@ -5,6 +5,15 @@
 ## 当前交接
 
 - 更新日期：2026-11-10。
+- 本轮目标：删除旧版本条件循环设置，只保留新的多循环卡片界面。
+- 已完成：删除旧启用 checkbox / 兼容入口 / flat 配置 DOM、旧事件、旧 picker / renderer 和无用样式；[loop.js](../object_inpainting_studio/static/loop.js) 保留文件夹与共享请求 / 点选逻辑，[multiple_loops.js](../object_inpainting_studio/static/multiple_loops.js) 为唯一条件配置界面。导入 / 恢复 / 直接赋值旧 flat 时自动一次性深拷贝为 loops，保留原参数、仅补缺省，并从旧体的保存来源及条件推导 end；缺失引用和非法值保留提示修正，不猜保存目标，不改原对象 / 用户文件。坏原始配置需明确删除，不静默取消验收。后端 flat API 兼容保留，不暴露旧设置。
+- 实际验证：全部前端 108 项通过，移除过时旧 UI 测试并将有价值的计划 / 网络 / 文件夹等测试转到新控制器；条件共享 21 项、多循环 39 项。真实 Chromium 5 项通过，旧配置迁移用例确认旧 DOM 不存在且条件 / 种子 / 限制保留，新向导仍失败一轮后达标保存，并回归多循环 / 动态输出 / 历史缓存。`node --check`、浏览器测试 Python 语法、相关编辑器诊断、`git diff --check`、文档本地链接和修改文件 EOF 检查均通过。
+- 验证边界：后端未修改，本轮未重跑非浏览器 Python（前轮 293 项通过）；未运行完整浏览器套件或真实 SAM / FLUX，未重启服务，保留原有未提交修改。
+- 下一步：刷新 Studio，条件区只显示“＋ 添加循环”和新卡片；旧文件直接导入自动转换。下一项业务任务未指定。
+
+## 前次多循环向导
+
+- 更新日期：2026-11-10。
 - 本轮目标：用“添加循环 → 点 start → 点 end → 点 condition”替代繁杂单循环启用配置，支持多个独立或串联循环。
 - 已完成：[multiple_loops.js](../object_inpainting_studio/static/multiple_loops.js) 提供独立循环卡片、点击式顺序向导、命名删除重选、单标量条件标题直选 / 多标量点端口、颜色角色定位、高级多起终点 / 条件 / 重试选项；主入口不需先启用，旧开关收到兼容入口。起点非负 INT seed 自动递增，-1 保持随机不改用户参数。最终保存独立共享且唯一时自动选择，删最后循环恢复普通保存。旧 flat 仍可运行，添加新循环时有效旧配置保留后迁移，无效旧配置明确提示。
 - 后端：[conditional_loop.py](../object_inpainting_studio/conditional_loop.py) 增加 `MultiConditionalPlan` / 工厂，配置 `conditional_loop={loops:[{id,name,start_nodes,end_nodes,seed_nodes,conditions,...}]}`，支持 1～32 区域；body 取 start 后继与 end / 条件祖先交集，完整定义校验逃逸，按含桥接节点的传递依赖排序，拒绝重叠 / 嵌套 / 交叉依赖。各循环通过时强制算完 end 并隔离保留验收缓存；普通 bridge 不缓存未验收依赖。所选保存可读取验收体内中间图，其他普通外部中间输出须声明 end；未选保存分支不执行，执行切片不允许其他副作用。所有循环通过后只保存一次，任意失败 / 超时不写盘；历史和任务进度带循环身份，文件夹每图重置。

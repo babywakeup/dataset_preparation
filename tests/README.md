@@ -55,13 +55,13 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 ## 条件循环回归
 
 - [后端测试](test_conditional_loop.py)：26 项 CPU 用例，真实 PIL / 临时 PNG 保存，覆盖固定祖先只执行一次、循环体逐轮执行、输入原地修改隔离、达标图像与评分 / 种子同轮、AND 不跨轮拼接 / OR 全部分支计算、布尔 / 数字条件、作用域与副作用限制、耗尽失败 / 跳过、异常不重试、取消、模拟时钟超时（含保存依赖返回后的拦截）、单图 API / 普通保存防绕过、任务互斥、文件夹逐图独立缓存、字面图片解码和过滤索引一致的异步试跑。用 Event / join 而非等待轮询，不加载模型。
-- [前端测试](test_conditional_loop.js)：46 项真实控制函数 / DOM 事件测试，原 20 项覆盖配置控件、范围和种子校验、工作流导入导出、计划检查锁、单图 / 文件夹异步提交、普通保存拦截、进度历史、焦点保留和响应不确定时禁止重复提交；新增 26 项覆盖重复类型的精确实例、多起点 / 种子切换、保存终点限制、实际 header / 输出端口点选与 Escape、数字 / 布尔条件精确端口、拒绝无效点击、不误建连、定位、角色高亮、计划失效但保留预览、运行锁和恢复重置。
+- [前端条件控制测试](test_conditional_loop.js)：21 项覆盖唯一多循环界面的计划检查、标量 / 种子校验、单图 / 文件夹异步提交、普通保存拦截、进度历史、焦点和请求状态不确定时禁止重复提交。移除已不存在的旧控件测试；各 VM harness 均加载正式的多循环控制器，不伪造旧 DOM 保留死代码。
 - [浏览器测试](test_object_inpainting_studio_browser.py) 的 `test_conditional_retry_ui_checks_plan_saves_only_accepted_attempt` 从实际控件配置条件，以 CPU 图片替代 FLUX.execute；检查计划零推理 / 零写盘，seed=0 红图失败、seed=1 蓝图达标，仅保存后者。外部 `STUDIO_TEST_URL` 模式跳过，不证明真实模型质量。
-- 同文件 `test_conditional_canvas_picker_selects_exact_instances_and_ports` 在 Chromium 中创建成对的生成 / 评分 / 保存实例，通过真实按钮、标题和端口只选择第二个分支，验证多选增删、错误候选不改选、已有连线不变、条件比较符 / 阈值保留、角色高亮、精确定位、历史预览和配置往返；不运行模型。
+- 同文件 `test_conditional_canvas_picker_selects_exact_instances_and_ports` 在 Chromium 中恢复旧 flat 配置，确认旧 DOM 已完全移除、配置自动转成新卡片，保留第二个同类分支及条件 / 种子 / 重试策略；用新按钮、标题和端口验证错误候选不改选、已有连线不变、角色高亮、精确定位、历史预览和往返。不运行模型。单循环达标保存用例也已切换为新点击向导。
 - [多循环后端](test_multiple_conditional_loops.py)：47 项 CPU / PIL 测试，覆盖独立重试、串联及反序配置按 DAG 排序、bridge 缓存、显式 end 强制执行、所选保存读取验收中间图、后循环失败无写盘、变异隔离、取消 / 超时、旧 flat 兼容、API 与文件夹逐图重置、32 个循环、非法 ID / 混写 / 重叠 / 逃逸、多个 SaveImages 中仅执行所选切片并写其目录。
-- [多循环前端](test_multiple_loops.js)：29 项真实控制器 / DOM 用例，覆盖添加自动向导、同类实例与多个循环独立编辑删除、条件单标量标题 / 多标量端口、种子自动选择和 -1、旧配置迁移 / 不完整保留、导入导出、作用域校验、输入焦点、运行锁、历史预览和进度归属。全部前端运行 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js tests/test_swatch_outputs.js tests/test_multiple_loops.js`。
+- [多循环前端](test_multiple_loops.js)：39 项真实控制器 / DOM 用例，覆盖自动向导、同类实例独立编辑删除、精确条件端口、种子、范围校验、焦点、运行锁、预览与进度，并验证旧 DOM / handler / renderer 不存在、有效 / 无效 flat 自动迁移、只补缺省、不替换失效目标、不改原输入、坏原始值显式删除、下载导入只生成新格式。全部前端运行 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js tests/test_swatch_outputs.js tests/test_multiple_loops.js`。
 - 浏览器 `test_multiple_loop_wizard_runs_each_region_and_saves_once` 从折叠面板的 Add 开始，仅点标题配置两个循环，评分节点直接作为 end，逐轮 seed=0/1 和 10/11 分别失败再通过；以 CPU 图替代 FLUX，检查计划无推理写盘，实际保存两张蓝图、前序无重复生成、报告 / 输入焦点 / 真实下载导入 / 删除最后循环恢复普通保存。
-- 最新多循环实测：全部非浏览器 Python 293 项、全部前端 JS 123 项、重点 Chromium 5 项（多循环向导 / 旧实例点选 / 旧达标保存 / 动态色块 / 缓存保存）通过；未运行完整浏览器套件，未验证真实模型。
+- 删除旧界面后的最新实测：全部前端 JS 108 项、重点 Chromium 5 项（多循环向导 / 旧配置自动迁移及实例点选 / 新向导达标保存 / 动态色块 / 缓存保存）通过。后端本轮未修改、未重跑非浏览器 Python；前次 293 项通过。未运行完整浏览器套件，未验证真实模型。
 - 在数据准备目录、选定虚拟环境中可运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" ../.venv/bin/python -m unittest test_conditional_loop -v`；前端运行 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js`。
 
 ## pytest

@@ -79,16 +79,12 @@ class StudioBrowserTests(unittest.TestCase):
         self.page.evaluate("""workflow => {
             state.workflow = workflow; restoreLoop(); render();
         }""", workflow)
-        self.page.locator("#conditional-panel").evaluate("element => element.open = true")
-        self.page.locator("#conditional-legacy").click()
-        self.page.locator("#conditional-enabled").check()
-        self.page.get_by_label("单图条件保存终点", exact=True).select_option("save")
-        self.page.get_by_label("显式起点 · 可多选（Ctrl / Cmd）", exact=True).select_option("generate")
-        self.page.get_by_label("递增种子节点 · 可多选，须在循环体内", exact=True).select_option("generate")
-        self.page.get_by_role("button", name="＋ 添加条件", exact=True).click()
-        self.page.get_by_label("条件 1 输出", exact=True).select_option(json.dumps(["score", "score"], separators=(",", ":")))
+        self.page.locator("#conditional-add").click()
+        self.page.locator('.node[data-node-id="generate"] .node-header').click()
+        self.page.locator('.node[data-node-id="score"] .node-header').click()
+        self.page.locator('.node[data-node-id="score"] .node-header').click()
         self.page.get_by_label("条件 1 运算符", exact=True).select_option("<=")
-        threshold = self.page.get_by_label("条件 1 阈值", exact=True)
+        threshold = self.page.get_by_label("条件 1 比较值", exact=True)
         threshold.fill("1")
         threshold.press("Tab")
         with patch.object(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"], "execute", side_effect=generate):
@@ -206,60 +202,60 @@ class StudioBrowserTests(unittest.TestCase):
                 score_2: {class_type: 'ColorSimilarityNode', inputs: {image1: link('generate_2', 'image'), image2: link('original', 'target')}},
                 save: {class_type: 'SaveImagesNode', inputs: {img1: link('generate', 'image'), dir: '/unused'}},
                 save_2: {class_type: 'SaveImagesNode', inputs: {img1: link('generate_2', 'image'), dir: '/unused2'}}
-            }, outputs: {}};
-            restoreLoop(); state.layout = {}; state.selected = null;
+            }, outputs: {}, conditional_loop: {
+                name: '原有换色循环', start_nodes: ['generate_2'], seed_nodes: ['generate_2'],
+                conditions: [{node: 'score_2', output: 'score', operator: '<=', value: 10}],
+                max_iterations: 12, timeout_seconds: 45, mode: 'all', on_exhausted: 'skip'
+            }};
+            restoreLoop({conditionalTargetId: 'save_2'}); state.layout = {}; state.selected = null;
             state.previewSession = 'historical-session';
             state.nodeResults = {generate_2: {image: {kind: 'value', value: 'historical'}}};
             render();
         }""")
         self.page.locator("#conditional-panel").evaluate("element => element.open = true")
-        self.page.locator("#conditional-legacy").click()
-        self.page.locator("#conditional-enabled").check()
+        expect(self.page.locator("#conditional-legacy, #conditional-enabled, #conditional-fields")).to_have_count(0)
+        expect(self.page.locator(".multiple-loop-card")).to_have_count(1)
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].name"), "原有换色循环")
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].max_iterations"), 12)
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].timeout_seconds"), 45)
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].on_exhausted"), "skip")
 
         def title(node_id: str):
             return self.page.locator(f'.node[data-node-id="{node_id}"] .node-header')
 
-        self.page.get_by_role("button", name="画布点选保存终点", exact=True).click()
+        self.page.get_by_role("button", name="画布选择最终保存目标", exact=True).click()
         title("generate").click()
-        self.assertIsNone(self.page.evaluate("conditionalUI.targetId"))
-        expect(self.page.locator("#status")).to_contain_text("保存终点必须选择")
+        self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
+        expect(self.page.locator("#status")).to_contain_text("SaveImages")
         title("save_2").click()
         self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
 
-        self.page.get_by_role("button", name="画布增删循环起点", exact=True).click()
-        title("generate").click()
+        self.page.get_by_role("button", name="重选起点", exact=True).click()
         title("generate_2").click()
-        title("generate").click()
-        self.page.keyboard.press("Escape")
-        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.start_nodes"), ["generate_2"])
-        self.page.get_by_role("button", name="画布增删种子节点", exact=True).click()
-        title("generate_2").click()
-        self.page.get_by_role("button", name="完成点选 / 取消 (Esc)", exact=True).click()
-        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.seed_nodes"), ["generate_2"])
-
-        self.page.get_by_role("button", name="＋ 添加条件", exact=True).click()
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].start_nodes"), ["generate_2"])
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].seed_nodes"), ["generate_2"])
         self.page.get_by_label("条件 1 运算符", exact=True).select_option("<=")
-        threshold = self.page.get_by_label("条件 1 阈值", exact=True)
+        threshold = self.page.get_by_label("条件 1 比较值", exact=True)
         threshold.fill("10")
         threshold.press("Tab")
         bindings = self.page.evaluate("JSON.stringify(Object.fromEntries(Object.entries(state.workflow.nodes).map(([id, n]) => [id, n.inputs])))")
         self.page.evaluate("state.connecting = {node: 'original', output: 'target'}")
-        self.page.get_by_role("button", name="画布点选条件 1 输出", exact=True).click()
+        self.page.get_by_role("button", name="重选条件 1", exact=True).click()
         self.page.locator('.port.output[data-node-id="generate_2"][data-port="image"]').click()
         self.assertIsNotNone(self.page.evaluate("conditionalUI.picking"))
         self.page.locator('.port.output[data-node-id="score_2"][data-port="score"]').click()
-        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.conditions"), [
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].conditions"), [
             {"node": "score_2", "output": "score", "operator": "<=", "value": 10}
         ])
         self.assertIsNone(self.page.evaluate("state.connecting"))
         self.assertEqual(self.page.evaluate("JSON.stringify(Object.fromEntries(Object.entries(state.workflow.nodes).map(([id, n]) => [id, n.inputs])))"), bindings)
-        expect(title("generate_2").locator(".conditional-role")).to_contain_text("循环起点 · 递增种子")
-        expect(title("score_2").locator(".conditional-role")).to_contain_text("条件输出")
-        expect(title("save_2").locator(".conditional-role")).to_contain_text("保存终点")
+        expect(title("generate_2").locator(".conditional-role")).to_contain_text("起点")
+        expect(title("score_2").locator(".conditional-role")).to_contain_text("条件")
+        expect(title("save_2").locator(".conditional-role")).to_contain_text("最终保存")
         expect(self.page.locator("#conditional-error")).to_have_text("")
-        self.assertEqual(self.page.evaluate("[...conditionalBody(state.workflow.conditional_loop, conditionalUI.targetId)]"), ["generate_2", "score_2"])
+        self.assertEqual(self.page.evaluate("[...multipleBody(state.workflow.conditional_loop.loops[0])]"), ["generate_2", "score_2"])
 
-        self.page.get_by_role("button", name=re.compile(r"^定位 score_2 ·")).click()
+        self.page.get_by_role("button", name=re.compile(r"^终点 · score_2 ·")).click()
         self.assertEqual(self.page.evaluate("state.selected"), "score_2")
         expect(self.page.locator('.node[data-node-id="score_2"]')).to_have_class(re.compile(r"\bselected\b"))
         self.assertEqual(self.page.evaluate("state.previewSession"), "historical-session")
@@ -271,7 +267,7 @@ class StudioBrowserTests(unittest.TestCase):
         }""")
         self.assertEqual(self.page.evaluate("conditionalUI.targetId"), "save_2")
         self.assertIsNone(self.page.evaluate("conditionalUI.picking"))
-        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.conditions[0].node"), "score_2")
+        self.assertEqual(self.page.evaluate("state.workflow.conditional_loop.loops[0].conditions[0].node"), "score_2")
         self.assertEqual(self.errors, [])
 
     def test_delete_node_button_cleans_links_outputs_and_preview(self) -> None:
