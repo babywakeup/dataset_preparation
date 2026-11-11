@@ -4,6 +4,8 @@
 
 ## 当前交接
 
+- 本轮色卡旧设置清理（2026-11-11）：核对确认色卡节点 / 前端 / 迁移器此前已删除旧 `images` 输出及兼容逻辑，本轮清除仓库工作流 (8)/(11) 的 `legacy_swatch_images`，并将 (6)/(8)/(11) 的旧色卡列表保存连线改为 `colorregionswatches.img1 → save.img6`；补齐保存项及 next ID，保存目录仍为 `images_0`，其他连线不变。当前打开的下载副本 (11) 同步清理。保存节点通用 `IMAGE_LIST` 输入及其他节点兼容不删；保留旧色卡端口拒绝测试，不新增自动迁移。修正使用指南和测试指南的旧列表说明，新增仓库 JSON 无残留 / 保存元数据回归。
+- 本轮验证：系统 PATH 无 Node，改用 VS Code 自带 Node 运行时执行五份前端测试，共 146 项通过（无失败 / 跳过）；PowerShell 实际解析 6 份仓库工作流、5 个色卡节点，核对无旧标记 / 旧连线、三份保存配置及下载副本一致。修改 JSON / JS 编辑器诊断和 `git diff --check` 通过。用户跳过 Python 环境配置，本轮未运行 Python、真实浏览器或模型，不沿用前轮结果；未重启服务。无阻塞，下一项任务未指定。
 - 本轮原名保存（2026-11-11）：按用户要求，Studio 保存 `filename` 留空时自动沿用唯一上游文件夹的当前 filename，或唯一 LoadTarget 字面路径的 basename；显式名称/连线优先，无明确来源才用 UUID。新增 `naming.py`，在独立执行图补默认命名，不改用户 JSON；覆盖普通逐张、条件循环、试跑和单图保存。保存仍统一 PNG、保留中文/多点主干、已有文件报冲突不覆盖不追加编号。更新节点帮助、端口说明和指南。
 - 本轮验证：`code_judge` Python 3.12.13，前轮相关十二模块 243 项通过（mock demo 等待）；五份 JS 145 项通过；真实 Chromium 三项通过（双保存沿用原名、试跑后运行全部同名冲突及模式往返、单图保存与逐张区分）。新增测试确认当前 index 名称、显式名称优先、原 JSON 不变、条件达标保存与默认同名重跑拒绝、中文多点文件名；旧损坏文件测试改用独立输出目录避免被原名冲突提前拦截。未运行模型/完整浏览器套件，未重启业务服务；无阻塞，下一项任务未指定。
 - 本轮逐张设计优化（2026-11-11）：落实 ComfyUI 参考中的显式结果、统一计划、分层调度。新增可选 `workflow.batch_execution`（mode/result_nodes/disabled_nodes），默认全部末端；卡片可“作为结果 / 取消结果”和“禁用 / 启用分支”，工具栏切模式，配置随 JSON 保留。可只选评分或循环内部中间节点，无需保存；禁用传播下游，必要验收依赖禁用时报错。指定结果只选必需循环，旧 flat 兼容；独立审查发现并修复中间结果未保留达标缓存而重跑、无关未完成循环提前校验、旧 flat 出口检查误拦截。删除节点会清理选择 / 禁用引用。
@@ -70,7 +72,7 @@
 - 更新日期：2026-11-10。
 - 本轮目标：色块节点参照动态保存项，按 index 列表提供任意数量的独立图片输出，不再要求连接列表。
 - 已完成：[色块节点](../object_inpainting/nodes/color_region_swatches.py) 使用直接填写的 `indices`（默认 `[0]`，0-based 非空非负整数列表）生成 `img1`～`imgN: RGB_IMAGE` 和 `colors`；如 `[0,2,1]` 对应三个可分别连接评分 / 保存的 RGB 32×32 色块。按位置命名，保留顺序 / 重复，越界仍明确失败；输出数量在执行前确定，不支持连线 / context 索引。
-- 执行器：[基类](../object_inpainting/nodes/base.py) 增加 `output_types(spec)`，[图执行器](../object_inpainting/graph.py) 保存实例 `output_types`，先完成全部节点归一化再检查连线，使用同一表校验图输出和实际返回集合；[条件循环](../object_inpainting_studio/conditional_loop.py) 同步读取实例输出。TypedDict 保持默认单口模板。旧 `images` 引用经 [迁移](../object_inpainting/workflow_migrations.py) 标记 `legacy_swatch_images`，只对旧节点额外保留列表；预览裁剪前扫描完整图以保持兼容。迁移深拷贝、幂等，不改用户文件。
+- 执行器：[基类](../object_inpainting/nodes/base.py) 增加 `output_types(spec)`，[图执行器](../object_inpainting/graph.py) 保存实例 `output_types`，先完成全部节点归一化再检查连线，使用同一表校验图输出和实际返回集合；[条件循环](../object_inpainting_studio/conditional_loop.py) 同步读取实例输出。TypedDict 保持默认单口模板。当时提供的旧 `images` 列表兼容和迁移现已删除；当前只支持独立 `imgN` / `colors`，旧连线须手动改接，本轮已清理仓库工作流中的残留设置。
 - 界面：[app.js](../object_inpainting_studio/static/app.js) 的 `nodeInfo()` 提供实例输出，卡片 / inspector 改索引后即时重绘端口；缩口清除失效下游输入 / 工作流输出，保留存续连线；重排改变其内容。受运行 / 检查 / 状态未知锁保护，无效编辑不改图，不能将输出或 context 接入 indices。普通编辑继续保留预览会话及历史图片。帮助和 [颜色指南](../object_inpainting_studio/COLOR_REGIONS.zh-CN.md) 已改为独立口用法。
 - 实际验证：项目 Python 3.12.8 虚拟环境、`PYTHONDONTWRITEBYTECODE=1`、项目 / tests 加入 PYTHONPATH、仅 GPU 1 可见；全部非浏览器 Python 246 项通过（新增动态输出 15 项），前端 68 项通过（新增动态色块 13 项），真实 Chromium 4 项通过（新动态口编辑 / 单图评分保存 / 缩口 + 旧列表 + 条件重试 + 生成后保存缓存）。动态用例使用真实 CPU 分色与 ΔE00 / PNG 像素验证；含模型的回归仍使用替代输出。相关编辑器 / 语法、差异空白和新增文件换行检查通过。
 - 验证边界：未运行完整浏览器套件，未加载真实 SAM / FLUX 权重，未重启用户服务，未修改用户流程 / 图片，保留原有未提交修改。新独立 Python `execute()` 接口需按 `imgN` 取图；只有旧工作流图引用提供列表兼容。

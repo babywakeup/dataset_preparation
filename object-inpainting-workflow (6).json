@@ -103,9 +103,9 @@
             "output": "image"
           },
           "dir": "./test",
-          "images": {
+          "img6": {
             "node": "colorregionswatches",
-            "output": "images"
+            "output": "img1"
           },
           "filename": "",
           "img5": null
@@ -130,9 +130,13 @@
           {
             "id": "img5",
             "name": ""
+          },
+          {
+            "id": "img6",
+            "name": "images_0"
           }
         ],
-        "save_next_id": 6
+        "save_next_id": 7
       },
       "autocolorregions": {
         "class_type": "AutoColorRegionsNode",

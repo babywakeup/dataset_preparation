@@ -8,6 +8,45 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const walk = element => [element, ...element.children.flatMap(walk)];
 const text = element => walk(element).map(item => item.textContent || "").join(" ");
 
+test("stored workflows use only independent swatch outputs and matching save items", () => {
+  const root = path.join(__dirname, "..");
+  let swatchCount = 0;
+  for (const filename of fs.readdirSync(root).filter(name => /^object-inpainting-workflow.*\.json$/.test(name))) {
+    const {workflow} = JSON.parse(fs.readFileSync(path.join(root, filename), "utf8"));
+    const swatches = Object.fromEntries(Object.entries(workflow.nodes)
+      .filter(([, spec]) => spec.class_type === "ColorRegionSwatchesNode"));
+    for (const [id, spec] of Object.entries(swatches)) {
+      swatchCount++;
+      assert.equal(Object.hasOwn(spec, "legacy_swatch_images"), false, `${filename}: ${id}`);
+    }
+    const checkBinding = binding => {
+      if (!binding || typeof binding !== "object" || !swatches[binding.node]) return;
+      const count = (swatches[binding.node].inputs.indices ?? [0]).length;
+      const outputs = ["colors", ...Array.from({length: count}, (_, i) => `img${i + 1}`)];
+      assert.ok(outputs.includes(binding.output), `${filename}: ${binding.node}.${binding.output}`);
+    };
+    Object.values(workflow.outputs ?? {}).forEach(checkBinding);
+    for (const spec of Object.values(workflow.nodes)) {
+      Object.values(spec.inputs).forEach(checkBinding);
+      if (spec.class_type !== "SaveImagesNode") continue;
+      for (const [input, binding] of Object.entries(spec.inputs)) {
+        if (!binding || !swatches[binding.node]) continue;
+        assert.match(input, /^img[1-9][0-9]*$/, filename);
+        assert.equal(spec.save_items.filter(item => item.id === input).length, 1, filename);
+        assert.ok(spec.save_next_id > Number(input.slice(3)), filename);
+      }
+    }
+  }
+  assert.ok(swatchCount > 0, "must inspect actual swatch nodes");
+  for (const version of [6, 8, 11]) {
+    const {workflow} = JSON.parse(fs.readFileSync(path.join(root, `object-inpainting-workflow (${version}).json`), "utf8"));
+    const save = workflow.nodes.save;
+    assert.deepEqual(save.inputs.img6, {node: "colorregionswatches", output: "img1"});
+    assert.equal(save.inputs.images, undefined);
+    assert.equal(save.save_items.find(item => item.id === "img6").name, "images_0");
+  }
+});
+
 // Exercise the real card, inspector, connection, preview and import/export controllers.
 function controller() {
   class Element {
