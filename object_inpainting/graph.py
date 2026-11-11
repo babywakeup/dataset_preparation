@@ -11,7 +11,7 @@ from .config import PipelineConfig
 from .nodes import NODE_CLASS_MAPPINGS
 from .quality import PreparedSample
 from .records import ObjectRecord
-from .workflow_migrations import migrate_color_swatch_outputs, migrate_sam3_dilation
+from .workflow_migrations import migrate_sam3_dilation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -56,8 +56,6 @@ class NodeGraph:
             if {"SAM3TextMaskNode", "MaskDilationNode"}.issubset(self.registry)
             else deepcopy(definition)
         )
-        if getattr(self.registry.get("ColorRegionSwatchesNode"), "DYNAMIC_IMAGE_OUTPUTS", False):
-            self.definition = migrate_color_swatch_outputs(self.definition)
         self.nodes = self.definition["nodes"]
         self.outputs = self.definition["outputs"]
         self.input_types: dict[str, dict[str, str]] = {}

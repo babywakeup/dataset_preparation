@@ -40,13 +40,13 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
   ../.venv/bin/python -m unittest discover -s tests -p 'test_color_region_swatches_node.py' -v
 ```
 
-原 [色块测试](test_color_region_swatches_node.py) 10 项覆盖 0-based 面积排名、独立 RGB 32×32 的 `imgN`、顺序和重复索引、非法列表 / 越界、图片预览及不写盘、旧图片列表连线兼容保存 / 模式保留 / 不覆盖，以及文件夹逐张中缺少排名时报告错误并继续。使用实际 CPU 分色，不加载 SAM 或 FLUX。
+[色块测试](test_color_region_swatches_node.py) 覆盖 0-based 面积排名、独立 RGB 32×32 的 `imgN`、顺序和重复索引、非法列表 / 越界、图片预览及不写盘、独立输出连线保存，以及文件夹逐张中缺少排名时报告错误并继续；另保留通用 SaveImages 图片列表的模式 / 不覆盖测试。使用实际 CPU 分色，不加载 SAM 或 FLUX。
 
 新增 [动态输出测试](test_dynamic_swatch_outputs.py) 15 项覆盖超过四口的任意数量、不同节点独立端口表、消费者先于生产者的 JSON 顺序、独立连接色差 / 图片保存、无效端口 / 类型 / 返回集合拒绝、迁移幂等与文件往返、不修改输入工作流、新预览无列表 / 旧预览保留列表、同会话修改索引后的缓存失效及批处理。运行 `-m unittest test_color_region_swatches_node test_dynamic_swatch_outputs -v`，需将项目 / tests 放入 `PYTHONPATH`。
 
 [前端动态输出测试](test_swatch_outputs.js) 新增 13 项真实控制函数测试，覆盖卡片 / inspector 改索引即时增减口、重排与重复、无效输入不改图、运行锁、清理被删输出的下游输入与工作流输出、保留其余连线 / 会话 / 历史预览，以及旧列表与导入导出兼容。全部前端命令为 `node --test tests/test_port_names.js tests/test_node_editing.js tests/test_conditional_loop.js tests/test_swatch_outputs.js`。
 
-[浏览器测试](test_object_inpainting_studio_browser.py) 的 `test_swatch_dynamic_outputs_connect_score_save_and_shrink` 通过实际 Chromium 页面改 `[0,2,1]` 增加输出、连接独立色块到保存项、与纯红色计算 ΔE00=0、保存真实 PNG 并核对像素，再缩为 `[0]` 验证断线及历史预览保留。原列表保存用例仍验证兼容端口和原目录。2026-11-10 实测非浏览器 Python 246 项、JS 68 项、重点 Chromium 4 项通过；未运行完整浏览器套件或真实模型推理。
+[浏览器测试](test_object_inpainting_studio_browser.py) 的 `test_swatch_dynamic_outputs_connect_score_save_and_shrink` 通过实际 Chromium 页面改 `[0,2,1]` 增加输出、连接独立色块到保存项、与纯红色计算 ΔE00=0、保存真实 PNG 并核对像素，再缩为 `[0]` 验证断线及历史预览保留。`test_color_region_swatches_individual_preview_and_separate_save` 验证仅有独立色块输出，无旧列表预览，保存到 img1/img2。旧 images 标记 / 迁移已删除，动态输出测试覆盖旧连线被拒绝。未运行真实模型推理。
 
 ## 跨请求预览缓存回归
 

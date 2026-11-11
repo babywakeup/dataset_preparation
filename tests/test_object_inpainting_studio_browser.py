@@ -633,7 +633,7 @@ class StudioBrowserTests(unittest.TestCase):
         expect(card.locator(".preview-state")).to_contain_text("历史预览")
         self.assertEqual(self.errors, [])
 
-    def test_color_region_swatches_list_input_preview_and_separate_save(self) -> None:
+    def test_color_region_swatches_individual_preview_and_separate_save(self) -> None:
         image_path = self.fixture.root / "swatch-image.png"
         mask_path = self.fixture.root / "swatch-mask.png"
         output = self.fixture.root / "swatch-output"
@@ -645,7 +645,7 @@ class StudioBrowserTests(unittest.TestCase):
             "nodes": {
                 "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": str(image_path), "mask": str(mask_path)}},
                 "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {"regions": {"node": "regions", "output": "regions"}}},
-                "save": {"class_type": "SaveImagesNode", "inputs": {"images": {"node": "swatches", "output": "images"}, "dir": str(output)}},
+                "save": {"class_type": "SaveImagesNode", "inputs": {"img1": {"node": "swatches", "output": "img1"}, "dir": str(output)}},
             },
             "outputs": {},
         }
@@ -659,16 +659,16 @@ class StudioBrowserTests(unittest.TestCase):
         indices.press("Enter")
         self.assertEqual(self.page.evaluate("state.workflow.nodes.swatches.inputs.indices"), [0, 1])
         self.page.locator('.node[data-node-id="swatches"] .node-preview-button').click()
-        # Legacy consumers retain their list alongside the new individual ports.
+        self.page.evaluate("state.workflow.nodes.save.inputs.img2 = link('swatches', 'img2'); render()")
         expect(self.page.locator('#node-preview img[alt^="img"]')).to_have_count(2)
-        expect(self.page.locator("#node-preview .composite-output img")).to_have_count(2)
-        self.assertTrue(self.page.evaluate("state.workflow.nodes.swatches.legacy_swatch_images"))
+        expect(self.page.locator("#node-preview .composite-output img")).to_have_count(0)
+        self.assertNotIn("images", self.page.evaluate("nodeInfo('swatches').outputs"))
         expect(self.page.locator("#node-preview")).to_contain_text("32 × 32 RGB")
         self.assertFalse(output.exists())
         self.page.locator('.node[data-node-id="save"] .node-preview-button').click()
         expect(self.page.locator("#status")).to_contain_text("保存成功")
         self.assertEqual(len(list(output.rglob("*.png"))), 2)
-        for folder, color in (("images_0", (255, 0, 0)), ("images_1", (0, 0, 255))):
+        for folder, color in (("img1", (255, 0, 0)), ("img2", (0, 0, 255))):
             with Image.open(next((output / folder).glob("*.png"))) as saved:
                 self.assertEqual((saved.size, saved.mode), ((32, 32), "RGB"))
                 self.assertEqual(saved.getcolors(), [(1024, color)])

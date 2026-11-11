@@ -80,12 +80,11 @@ class NodeContractTests(unittest.TestCase):
         self.assertEqual(NODE_CLASS_MAPPINGS["SaveImagesNode"].INPUT_TYPES["images"], "IMAGE_LIST")
         self.assertEqual(NODE_CLASS_MAPPINGS["FluxKleinReferenceNode"].INPUT_TYPES["reference_1"], "RGB_IMAGE")
 
-    def test_legacy_output_class_imports_still_resolve_to_one_shared_contract(self):
-        from object_inpainting.nodes.color_region_swatches import ColorSwatchOutputs, SwatchColors
+    def test_output_class_imports_resolve_to_one_shared_contract(self):
+        from object_inpainting.nodes.color_region_swatches import ColorSwatchOutputs
         from object_inpainting.nodes.flux_random_recolor import RandomRecolorOutputs
 
         self.assertIs(ColorSwatchOutputs, contracts.ColorSwatchOutputs)
-        self.assertIs(SwatchColors, contracts.SwatchColors)
         self.assertIs(RandomRecolorOutputs, contracts.RandomRecolorOutputs)
 
     def test_unknown_contract_types_fail_instead_of_silently_using_wrong_category(self):

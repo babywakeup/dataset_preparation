@@ -365,7 +365,7 @@ NODE_HELP["ColorRegionSwatchesNode"] = {
         "img1": "RGB_IMAGE：indices 第一个索引对应的独立 32×32 纯色图；列表有 N 项就提供 img1～imgN，可分别连接评分 / 保存节点。",
         "colors": "JSON_RECORD：所选 0-based 索引、原 1-based 区域 ID、平均 RGB、区域面积比例和色块尺寸。",
     },
-    "test": "将自动分色的 regions 接入，indices 填 [0,1] 并按 Enter，出现 img1、img2 两个独立输出；可各接 ColorSimilarityNode 或保存项。缩短列表会断开已移除端口，重排会改变存续端口内容。旧 images 连线保留兼容；新节点不输出列表。当前图缺少所选排名会明确报错。",
+    "test": "将自动分色的 regions 接入，indices 填 [0,1] 并按 Enter，出现 img1、img2 两个独立输出；可各接 ColorSimilarityNode 或保存项。缩短列表会断开已移除端口，重排会改变存续端口内容。仅提供 imgN 和 colors，不提供 images 列表。当前图缺少所选排名会明确报错。",
     "parameters": [],
 }
 

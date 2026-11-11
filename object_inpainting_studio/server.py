@@ -20,7 +20,6 @@ from object_inpainting.nodes.folder_images import folder_image, scan_folder
 from object_inpainting.pipeline import DEFAULT_WORKFLOW, build_dataset
 from object_inpainting.quality import PreparedSample, validate_sample
 from object_inpainting.records import ObjectRecord, load_target
-from object_inpainting.workflow_migrations import migrate_color_swatch_outputs
 from PIL import Image, ImageOps
 
 from .batch import BatchJobs
@@ -283,9 +282,6 @@ def node_preview_graph(definition: dict | None, node_id: str, extra_nodes=()) ->
         definition = definition["workflow"]
     if not isinstance(definition, dict) or not isinstance(definition.get("nodes"), dict):
         raise ValueError("Workflow must contain a nodes object.")
-    # Inspect the complete graph before pruning consumers, so previewing a
-    # legacy swatch still exposes the images port used by its downstream save.
-    definition = migrate_color_swatch_outputs(definition)
     selected = {}
 
     def visit(current):

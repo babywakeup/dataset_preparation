@@ -81,14 +81,14 @@ class ColorRegionSwatchesTests(unittest.TestCase):
                 "nodes": {
                     "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": {"context": "image"}, "mask": {"context": "mask"}}},
                     "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {"regions": {"node": "regions", "output": "regions"}, "indices": [0, 1]}},
-                    "save": {"class_type": "SaveImagesNode", "inputs": {"images": {"node": "swatches", "output": "images"}, "img4": {"context": "image"}, "dir": directory}},
+                    "save": {"class_type": "SaveImagesNode", "inputs": {"img1": {"node": "swatches", "output": "img1"}, "img2": {"node": "swatches", "output": "img2"}, "img4": {"context": "image"}, "dir": directory}},
                 },
                 "outputs": {"paths": {"node": "save", "output": "paths"}},
             })
             paths = graph.run({"image": self.image, "mask": self.mask})["paths"]
-            self.assertEqual(set(paths), {"img4", "images_0", "images_1"})
+            self.assertEqual(set(paths), {"img4", "img1", "img2"})
             self.assertEqual(len({Path(path).name for path in paths.values()}), 1)
-            for name, color in (("images_0", (255, 0, 0)), ("images_1", (0, 0, 255))):
+            for name, color in (("img1", (255, 0, 0)), ("img2", (0, 0, 255))):
                 with Image.open(paths[name]) as saved:
                     self.assertEqual((saved.mode, saved.size), ("RGB", (32, 32)))
                     self.assertEqual(saved.getcolors(), [(1024, color)])
@@ -129,13 +129,13 @@ class ColorRegionSwatchesTests(unittest.TestCase):
                 "nodes": {
                     "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": str(root / "image.png"), "mask": str(root / "mask.png")}},
                     "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {"regions": {"node": "regions", "output": "regions"}, "indices": [0, 1]}},
-                    "save": {"class_type": "SaveImagesNode", "inputs": {"images": {"node": "swatches", "output": "images"}, "dir": str(root / "out")}},
+                    "save": {"class_type": "SaveImagesNode", "inputs": {"img1": {"node": "swatches", "output": "img1"}, "img2": {"node": "swatches", "output": "img2"}, "dir": str(root / "out")}},
                 },
                 "outputs": {},
             }
             response = client.post("/api/node/preview", json={"workflow": workflow, "node_id": "swatches"})
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(len(response.json()["outputs"]["images"]["items"]), 2)
+            self.assertEqual(set(response.json()["outputs"]), {"img1", "img2", "colors"})
             self.assertFalse((root / "out").exists())
             response = client.post("/api/node/save-images", json={"workflow": workflow, "node_id": "save"})
             self.assertEqual(response.status_code, 200, response.text)
@@ -147,7 +147,7 @@ class ColorRegionSwatchesTests(unittest.TestCase):
             self.assertEqual(response.json()["node_error"]["node_id"], "swatches")
             self.assertIn("越界", response.json()["detail"])
 
-    def test_folder_loop_saves_lists_and_reports_missing_rank_per_image(self):
+    def test_folder_loop_saves_swatches_and_reports_missing_rank_per_image(self):
         manager = BatchJobs()
         with tempfile.TemporaryDirectory() as directory, patch.object(server, "BATCH_JOBS", manager), TestClient(app) as client:
             root = Path(directory)
@@ -162,7 +162,7 @@ class ColorRegionSwatchesTests(unittest.TestCase):
                     "folder": {"class_type": "FolderImagesNode", "inputs": {"dir": str(source)}},
                     "regions": {"class_type": "AutoColorRegionsNode", "inputs": {"image": {"node": "folder", "output": "image"}, "mask": str(root / "mask.png")}},
                     "swatches": {"class_type": "ColorRegionSwatchesNode", "inputs": {"regions": {"node": "regions", "output": "regions"}, "indices": [0, 1]}},
-                    "save": {"class_type": "SaveImagesNode", "inputs": {"images": {"node": "swatches", "output": "images"}, "dir": str(root / "out")}},
+                    "save": {"class_type": "SaveImagesNode", "inputs": {"img1": {"node": "swatches", "output": "img1"}, "img2": {"node": "swatches", "output": "img2"}, "dir": str(root / "out")}},
                 },
                 "outputs": {},
             }
@@ -178,7 +178,7 @@ class ColorRegionSwatchesTests(unittest.TestCase):
             self.assertEqual(len(list((root / "out").rglob("*.png"))), 4)
             self.assertNotEqual(job["results"][0]["paths"], job["results"][2]["paths"])
             for item in (job["results"][0], job["results"][2]):
-                self.assertEqual(set(item["paths"]), {"images_0", "images_1"})
+                self.assertEqual(set(item["paths"]), {"img1", "img2"})
 
 
 if __name__ == "__main__":

@@ -112,9 +112,6 @@ PORT_NAMES = {
     "SelectColorRegionNode": {
         "outputs": {"mask": ("mask", "所选颜色区域", "mask")},
     },
-    "ColorRegionSwatchesNode": {
-        "outputs": {"images": ("image_list", "旧流程兼容色块列表", "image_list")},
-    },
     "ColorSimilarityNode": {
         "inputs": {
             "image1": ("rgb_image_1", "第一张纯色 RGB 图片", "rgb_image"),

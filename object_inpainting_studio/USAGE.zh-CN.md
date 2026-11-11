@@ -62,7 +62,7 @@
 | `rgba_image` | 带透明通道的图 | 透明抠图 `rgba` → 白底参考节点 `rgba` |
 | `reference_rgb_image` | RGB 参考图 | 提取参考图 `reference` / 白底节点 `rgb` → 组合样本 `reference`；生成节点多槽显示 `reference_rgb_image_1`～`3` |
 | `imgN`（色块输出） | 每个端口各一张 RGB 32×32 纯色图 | 色块节点的 `indices` 决定数量与顺序，分别连接评分输入 / 保存项；见 [色块动态输出](COLOR_REGIONS.zh-CN.md) |
-| `image_list` | 图片列表兼容接口 | 保存节点 `images`；旧色块列表连线仍兼容，新色块节点不用列表 |
+| `image_list` | 通用图片列表接口 | 保存节点 `images` 可接通用列表；色块节点仅用独立 imgN，不再提供旧列表输出 |
 | `color_regions` | 运行时颜色区域集合，不是 JSON | 自动分色 `regions` → 选择区域 / 提取色块 `regions` |
 | `label_map` | 整数区域编号图，**不是二值 Mask** | 自动分色 `labels`，不可接 `mask` 输入 |
 | `overlay_rgb_image` / `palette_rgb_image` | 伪彩色叠加图 / 区域平均颜色填充图 | 自动分色的 `overlay` / `palette`，不要误当真实原图或二值 Mask |

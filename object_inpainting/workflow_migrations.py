@@ -3,27 +3,6 @@
 from copy import deepcopy
 
 
-def migrate_color_swatch_outputs(definition: dict) -> dict:
-    """Keep the old list port only on nodes whose images output is referenced."""
-    result = deepcopy(definition)
-    nodes = result.get("nodes")
-    if not isinstance(nodes, dict):
-        return result
-    bindings = []
-    for spec in nodes.values():
-        if isinstance(spec, dict) and isinstance(spec.get("inputs"), dict):
-            bindings.extend(spec["inputs"].values())
-    if isinstance(result.get("outputs"), dict):
-        bindings.extend(result["outputs"].values())
-    for binding in bindings:
-        if not isinstance(binding, dict) or set(binding) != {"node", "output"} or binding["output"] != "images":
-            continue
-        source = nodes.get(binding["node"]) if isinstance(binding["node"], str) else None
-        if isinstance(source, dict) and source.get("class_type") == "ColorRegionSwatchesNode":
-            source["legacy_swatch_images"] = True
-    return result
-
-
 def migrate_sam3_dilation(definition: dict) -> dict:
     result = deepcopy(definition)
     nodes = result.get("nodes")

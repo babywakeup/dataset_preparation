@@ -41,9 +41,6 @@ function nodeInfo(id) {
   if (spec.class_type === "ColorRegionSwatchesNode") {
     const indices = spec.inputs.indices ?? info.input_defaults?.indices ?? [0];
     const selected = validSwatchIndices(indices) ? indices : [0];
-    // Older, not-yet-normalized workflows may still consume the list output.
-    const usesImages = binding => isLink(binding) && binding.node === id && binding.output === "images";
-    if (Object.values(state.workflow.outputs || {}).some(usesImages) || Object.values(state.workflow.nodes).some(node => Object.values(node.inputs).some(usesImages))) spec.legacy_swatch_images = true;
     const outputs = {};
     const labels = {};
     const helpOutputs = {};
@@ -56,11 +53,6 @@ function nodeInfo(id) {
     outputs.colors = "JSON_RECORD";
     helpOutputs.colors = info.help.outputs.colors;
     if (info.port_labels?.outputs?.colors) labels.colors = info.port_labels.outputs.colors;
-    if (spec.legacy_swatch_images === true) {
-      outputs.images = "IMAGE_LIST";
-      labels.images = { name: "images", role: "旧流程兼容图片列表", kind: "image_list" };
-      helpOutputs.images = "旧流程兼容图片列表；新连接请使用独立 imgN 输出。";
-    }
     return { ...info, outputs, port_labels: { ...info.port_labels, outputs: labels }, help: { ...info.help, outputs: helpOutputs } };
   }
   if (spec.class_type !== "SaveImagesNode") return info;

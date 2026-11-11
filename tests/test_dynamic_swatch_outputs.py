@@ -1,4 +1,4 @@
-"""CPU regressions for per-instance swatch ports and legacy list migration."""
+"""CPU regressions for per-instance swatch ports and rejection of removed list ports."""
 
 import base64
 import io
@@ -16,7 +16,6 @@ from object_inpainting.color_regions import segment_colors
 from object_inpainting.graph import NodeExecutionError, NodeGraph
 from object_inpainting.nodes import NODE_CLASS_MAPPINGS, ColorRegionSwatchesNode
 from object_inpainting.nodes.auto_color_regions import AutoColorRegionsNode
-from object_inpainting.workflow_migrations import migrate_color_swatch_outputs
 from object_inpainting_studio import server
 from object_inpainting_studio.batch import BatchJobs
 from object_inpainting_studio.preview_cache import PreviewCache
@@ -169,7 +168,7 @@ class DynamicSwatchOutputsTests(unittest.TestCase):
         self.assertEqual(set(result["paths"]), {"img1", "img2", "img3"})
         for position, index in enumerate([0, 2, 1], 1):
             path = Path(result["paths"][f"img{position}"])
-            self.assertEqual(path, self.root / "new" / f"img{position}" / "sample.png")
+            self.assertTrue(path.samefile(self.root / "new" / f"img{position}" / "sample.png"))
             self.assert_saved_image(path, self.colors[index])
         self.assertEqual(len(list((self.root / "new").rglob("*.png"))), 3)
 
@@ -232,19 +231,22 @@ class DynamicSwatchOutputsTests(unittest.TestCase):
                 self.assertEqual(caught.exception.node_id, "swatches")
                 self.assertEqual(caught.exception.error_type, "ValueError")
 
-    def test_migration_normalization_is_deepcopied_idempotent_and_disk_roundtrips(self):
+    def test_removed_list_port_is_not_enabled_by_old_metadata(self):
+        workflow = self.workflow([0, 1])
+        workflow["nodes"]["swatches"]["legacy_swatch_images"] = True
+        graph = NodeGraph(workflow)
+        self.assertNotIn("images", graph.output_types["swatches"])
+        workflow["outputs"]["old_list"] = link("swatches", "images")
+        with self.assertRaisesRegex(ValueError, "images"):
+            NodeGraph(workflow)
+
+    def test_normalization_is_deepcopied_and_disk_roundtrips(self):
         workflow = self.workflow([0, 2, 1])
-        workflow["nodes"]["untouched"] = swatch_spec([1])
         workflow["nodes"]["save"] = {"class_type": "SaveImagesNode", "inputs": {
-            "images": link("swatches", "images"), "dir": str(self.root / "out"), "filename": "old.jpg",
+            "img1": link("swatches", "img1"), "img2": link("swatches", "img2"),
+            "dir": str(self.root / "out"), "filename": "sample.jpg",
         }}
         before = deepcopy(workflow)
-        migrated = migrate_color_swatch_outputs(workflow)
-        self.assertTrue(migrated["nodes"]["swatches"]["legacy_swatch_images"])
-        self.assertNotIn("legacy_swatch_images", migrated["nodes"]["untouched"])
-        self.assertEqual(migrate_color_swatch_outputs(migrated), migrated)
-        migrated["nodes"]["swatches"]["inputs"]["indices"].append(0)
-        self.assertEqual(workflow, before)
         graph = NodeGraph(workflow)
         self.assertEqual(NodeGraph(graph.definition).definition, graph.definition)
         self.assertEqual(workflow, before)
@@ -256,32 +258,22 @@ class DynamicSwatchOutputsTests(unittest.TestCase):
         loaded = NodeGraph.from_file(path)
         self.assertEqual(loaded.definition, graph.definition)
         self.assertEqual(loaded.output_types, graph.output_types)
-        self.assertEqual(json.loads(path.read_text())["nodes"]["save"]["inputs"]["dir"], str(self.root / "out"))
         self.assertFalse((self.root / "out").exists())
 
-    def test_graph_output_alone_enables_legacy_list_and_preserves_old_save_paths(self):
-        workflow = self.workflow([0, 2, 1])
-        workflow["outputs"] = {"legacy": link("swatches", "images"), "single": link("swatches", "img2")}
-        graph = NodeGraph(workflow)
-        self.assertTrue(graph.nodes["swatches"]["legacy_swatch_images"])
-        self.assertEqual(graph.output_types["swatches"], {
-            "img1": "RGB_IMAGE", "img2": "RGB_IMAGE", "img3": "RGB_IMAGE",
-            "colors": "JSON_RECORD", "images": "IMAGE_LIST",
-        })
-        result = graph.run({"regions": self.regions})
-        self.assertEqual(len(result["legacy"]), 3)
-        self.assertIs(result["legacy"][1], result["single"])
-        workflow["nodes"]["save"] = {"class_type": "SaveImagesNode", "inputs": {
-            "images": link("swatches", "images"), "dir": str(self.root / "legacy"), "filename": "original.jpg",
-        }}
-        workflow["outputs"]["paths"] = link("save", "paths")
-        paths = NodeGraph(workflow).run({"regions": self.regions})["paths"]
-        self.assertEqual(set(paths), {"images_0", "images_1", "images_2"})
-        for position, index in enumerate([0, 2, 1]):
-            path = self.root / "legacy" / f"images_{position}" / "original.png"
-            self.assertEqual(Path(paths[f"images_{position}"]), path)
-            self.assert_saved_image(path, self.colors[index])
-        self.assertNotIn("legacy_swatch_images", workflow["nodes"]["swatches"])
+    def test_old_list_consumers_and_graph_outputs_are_rejected(self):
+        for graph_output in (False, True):
+            workflow = self.workflow([0, 2, 1])
+            if graph_output:
+                workflow["outputs"] = {"old_list": link("swatches", "images")}
+            else:
+                workflow["nodes"]["save"] = {"class_type": "SaveImagesNode", "inputs": {
+                    "images": link("swatches", "images"), "dir": str(self.root / "old"),
+                }}
+            with self.assertRaisesRegex(ValueError, "images"):
+                NodeGraph(workflow)
+            response = self.client.post("/api/workflow/validate", json={"workflow": workflow, "require_dataset": False})
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertFalse((self.root / "old").exists())
 
     def test_standalone_api_preview_exposes_only_new_imgn_images(self):
         result = self.preview(self.api_workflow([0, 2, 1]))
@@ -292,29 +284,18 @@ class DynamicSwatchOutputsTests(unittest.TestCase):
         self.assertEqual(set(result["executed_nodes"]), {"regions", "swatches"})
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["image.png", "mask.png"])
 
-    def test_legacy_api_preview_keeps_list_after_consumer_or_graph_outputs_are_pruned(self):
-        for consumer in (False, True):
-            with self.subTest(consumer=consumer):
-                workflow = self.api_workflow([0, 2, 1])
-                if consumer:
-                    workflow["nodes"]["save"] = {"class_type": "SaveImagesNode", "inputs": {
-                        "images": link("swatches", "images"), "dir": str(self.root / "never"),
-                    }}
-                else:
-                    workflow["outputs"]["legacy"] = link("swatches", "images")
-                before = deepcopy(workflow)
-                pruned = server.node_preview_graph(workflow, "swatches")
-                self.assertNotIn("save", pruned.nodes)
-                self.assertEqual(pruned.outputs, {})
-                self.assertTrue(pruned.nodes["swatches"]["legacy_swatch_images"])
-                result = self.preview(workflow)
-                self.assertEqual(set(result["outputs"]), {"img1", "img2", "img3", "colors", "images"})
-                items = result["outputs"]["images"]["items"]
-                self.assertEqual(set(items), {"0", "1", "2"})
-                for position, index in enumerate([0, 2, 1]):
-                    self.assert_preview_image(items[str(position)], self.colors[index])
-                self.assertEqual(workflow, before)
-                self.assertFalse((self.root / "never").exists())
+    def test_preview_does_not_restore_removed_port_from_unselected_consumers(self):
+        workflow = self.api_workflow([0, 2, 1])
+        workflow["nodes"]["save"] = {"class_type": "SaveImagesNode", "inputs": {
+            "images": link("swatches", "images"), "dir": str(self.root / "never"),
+        }}
+        before = deepcopy(workflow)
+        result = self.preview(workflow)
+        self.assertEqual(set(result["outputs"]), {"img1", "img2", "img3", "colors"})
+        response = self.client.post("/api/node/save-images", json={"workflow": workflow, "node_id": "save"})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(workflow, before)
+        self.assertFalse((self.root / "never").exists())
 
     def test_indices_change_invalidates_cached_swatch_but_reuses_untouched_ancestors(self):
         workflow = self.api_workflow([0, 2, 1])
@@ -401,7 +382,7 @@ class DynamicSwatchOutputsTests(unittest.TestCase):
             self.assertEqual(set(item["paths"]), {"img1", "img2", "img3"})
             for position, index in enumerate([0, 2, 1], 1):
                 path = self.root / "out" / f"img{position}" / filename
-                self.assertEqual(Path(item["paths"][f"img{position}"]), path)
+                self.assertTrue(Path(item["paths"][f"img{position}"]).samefile(path))
                 self.assert_saved_image(path, self.colors[index])
         self.assertEqual(len(list((self.root / "out").rglob("*.png"))), 6)
         self.assertEqual(list((self.root / "out").rglob("b.png")), [])

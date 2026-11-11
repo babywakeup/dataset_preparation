@@ -19,7 +19,7 @@
 | `OverlayRGBImage` / `PaletteRGBImage` | 伪彩色叠加 / 区域平均颜色填充 RGB 图 |
 | `ColorRGBImage` | 候选纯色色块 |
 | `LabelMap` | PIL 整数标签图，不是二值 Mask |
-| `ImageList` | 图片列表兼容类别；色块节点新接口采用独立 RGB 输出，旧列表连线仍兼容 |
+| `ImageList` | 通用图片列表类别；色块节点仅提供独立 RGB 输出，不提供列表 |
 | `BoundingBox` / `FloatBoundingBox` | 整数框 / SAM2 也接受的浮点框；四个坐标，左上右下 |
 | `FilePath` / `PathString` | 输入可为 `str` 或 `Path` / 输出字符串但图端口类别仍为 PATH |
 | `OptionalReferenceImage` | PIL 图、路径或 None；FLUX 会读取路径并将参考图规范化；空字符串表示不提供 |
@@ -60,7 +60,7 @@ class GrayMaskNode(Node):
 
 [节点基类](../object_inpainting/nodes/base.py) 新增 `output_types(spec)`，默认仍返回静态 `OUTPUT_TYPES`。图执行器先完成所有节点的元数据 / 默认值 / 实例端口归一化，再检查连线，因此 JSON 中消费者排在色块节点前也能引用 `imgN`。图输出类型、下游连线、运行返回键集合及条件标量检查均采用实例表，不放宽未知端口。
 
-旧工作流的 `images` 引用通过深拷贝、幂等迁移启用 `legacy_swatch_images`，此时 `execute_with_spec()` 额外组装兼容列表。独立 `execute()` 只返回新独立输出；旧导入类路径保持不变。Studio 必须在裁剪预览祖先之前识别完整图的旧引用，避免仅预览色块时丢失兼容端口。
+色块节点已删除旧 `images` 输出、兼容列表组装和自动迁移；运行图与 Studio 都只使用 `imgN` / `colors`。旧连线会被端口校验拒绝，需要手动改接对应 `imgN`。`SwatchColors` 从合同模块导入，不再通过色块节点模块兼容导出。
 
 ## 节点类对照
 
@@ -97,7 +97,7 @@ class GrayMaskNode(Node):
 | `LoopDemoImageNode` | `LoopDemoImageInputs` | `LoopDemoImageOutputs` |
 | `LoopDemoScoreNode` | `LoopDemoScoreInputs` | `LoopDemoScoreOutputs` |
 
-分色已有的两个输出类仍定义在 [color_regions.py](../object_inpainting/color_regions.py)，通过合同模块统一导出；旧的色块 / 换色输出类导入路径也继续指向同一份类，避免重复定义。
+分色已有的两个输出类仍定义在 [color_regions.py](../object_inpainting/color_regions.py)，通过合同模块统一导出；色块与换色节点使用合同模块的输出类，避免重复定义。
 
 [独立膨胀节点](../object_inpainting/nodes/mask_dilation.py) 输入 `mask: MaskImage`、`dilation_steps: int`、`dilation_kernel: int`，返回 `MaskDilationOutputs` 的 `mask: MaskImage`、`bbox: BoundingBox`、`quality: str`。SAM3 合同不再包含膨胀字段，保留两项 float 阈值；原始 Mask 与膨胀 Mask 可以连接不同分支。
 

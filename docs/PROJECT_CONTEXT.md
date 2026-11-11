@@ -53,10 +53,10 @@
 | Studio 默认原图命名 | [naming.py](../object_inpainting_studio/naming.py) 在 `node_preview_graph` 构建后的独立图上补全空 filename：唯一上游 FolderImages 连接其动态 filename，否则唯一字面路径 LoadTarget 使用路径 basename；显式 filename 优先，无明确来源保留节点 UUID 后备。仅引用已存在祖先，不增加执行分支，不修改用户工作流。覆盖逐张/条件/单图保存，PNG 扩展名与不覆盖规则由 SaveImages 保证 |
 | 操作语义与保存目录 | [中文使用指南](../object_inpainting_studio/USAGE.zh-CN.md) |
 | 自动颜色区域 / 随机换色 | [颜色区域指南](../object_inpainting_studio/COLOR_REGIONS.zh-CN.md)、[换色指南](../object_inpainting_studio/RANDOM_RECOLOR.zh-CN.md) |
-| 面积排名列表 → 独立 32×32 代表色图 | [color_region_swatches.py](../object_inpainting/nodes/color_region_swatches.py)，`indices=[0,2]` → `img1/index=0`、`img2/index=2`，分别接评分 / 保存图片项；旧 `images` 连线自动兼容 |
+| 面积排名列表 → 独立 32×32 代表色图 | [color_region_swatches.py](../object_inpainting/nodes/color_region_swatches.py)，`indices=[0,2]` → `img1/index=0`、`img2/index=2`，分别接评分 / 保存图片项；仅提供 imgN/colors，旧 images 已删除 |
 
 - 批处理状态在进程内，不应假设服务重启能续跑。
-- 色块列表缩短时前端清理已删除输出的下游输入和工作流输出，保留其余连线；重排按位置改变内容。卡片 / inspector / edges / 预览统一采用 `nodeInfo()` 实例输出；拓扑编辑受运行 / 检查锁保护，保留历史预览与会话。旧 `images` 引用由 [兼容迁移](../object_inpainting/workflow_migrations.py) 标记 `legacy_swatch_images`，只对旧节点额外保留列表。预览裁剪前先迁移完整图，保持消费者不在祖先集合时的旧列表输出。
+- 色块列表缩短时前端清理已删除输出的下游输入和工作流输出，保留其余连线；重排按位置改变内容。卡片 / inspector / edges / 预览统一采用 `nodeInfo()` 实例输出；拓扑编辑受运行 / 检查锁保护，保留历史预览与会话。色块旧 images 兼容输出、标记处理和迁移均已删除，旧连线需改接独立 imgN；无自动转换。SaveImages 的通用图片列表输入不受影响。
 - 条件循环是 Studio 控制层，不改普通 DAG 为任意有环图。新 `conditional_loop={loops:[...]}` 支持 1～32 个 ID 唯一的循环，每个含 `id/name`、`start_nodes/end_nodes/seed_nodes`、`conditions[{node, output, operator, value}]`、`mode=all/any`、`max_iterations`、`timeout_seconds`、`on_exhausted=fail/skip`。旧 flat 格式继续用 `ConditionalPlan` 原语义，两种根字段禁止混写；`build_conditional_plan()` 分派。普通 `NodeGraph.start/run` 继续拒绝条件元数据，不能绕过验收。暂不支持重叠 / 嵌套 / 反馈。
 - `prepare_conditional` 裁剪所选 SaveImages、所有条件及显式 end 的祖先，共享归一化后的图给计划与上下文。`MultiConditionalPlan` 取 `descendants(start) ∩ ancestors(end+conditions)` 为各体，验证 start 可达 end、条件 / 种子在体内、非重叠、与所选保存有数据关系，并按传递依赖拓扑排序（含普通 bridge）。end 是验收根，不是普通下游可读端口的白名单：普通节点和所选保存均可消费任意已验收体内输出，无需追加 end。完整定义仍用于边界 / 直接工作流输出等校验；额外写盘检查仅针对本次执行切片，未选保存分支不执行。布尔只支持 == / !=，数字有限；显式递增种子须非负 INT，逐文件重置。
 - `/api/conditional/plan` 只检查结构，不推理或写盘；`/api/conditional` 启动当前图的单图后台任务。`/api/batch/plan` 包含所选文件夹所有下游末端及依赖，支持无条件评分和多个保存分支；工具栏运行入口只用于定位文件夹。启用条件时，所有末端在验收后复用达标缓存执行，拒绝评分上游写盘；`/api/batch/preview` 为异步单文件任务并使用批量过滤后的同一 index。所有 SaveImages 输出目录参与输入扫描排除，后续保存错误清理本张此前新建的 SaveImages 文件，取消仍保留已完成输出。结果保留主入口 `paths`，另含 `paths_by_node` 与全部末端预览（仅当前输入）。单图 / 文件夹 / 条件试跑共用 `BATCH_JOBS` 互斥。计划与上下文使用同一图对象，避免图片路径解码重写后运行旧图。

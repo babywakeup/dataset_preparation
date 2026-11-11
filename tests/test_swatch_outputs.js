@@ -279,19 +279,14 @@ test("dynamic outputs connect by instance type and render positional preview cap
   assert.equal(walk(view).find(item => item.tagName === "img").alt, "img4");
 });
 
-test("legacy metadata and pre-normalization consumer edges retain images and list previews", () => {
+test("removed list output cannot be restored by old flags or consumer links", () => {
   for (const setup of ["state.workflow.nodes.swatches.legacy_swatch_images = true", "state.workflow.nodes.target.inputs.list = link('swatches', 'images')", "state.workflow.outputs.legacy = link('swatches', 'images')"]) {
     const ui = controller();
     ui.run(setup);
-    assert.equal(ui.run("nodeInfo('swatches').outputs.images"), "IMAGE_LIST");
-    assert.equal(ui.run("state.workflow.nodes.swatches.legacy_swatch_images"), true);
+    assert.equal(ui.run("nodeInfo('swatches').outputs.images"), undefined);
+    assert.equal(ui.run("portType('swatches', 'images')"), undefined);
     assert.equal(ui.run("editSwatchIndices('swatches', '[0]')"), true);
-    assert.equal(ui.run("portType('swatches', 'images')"), "IMAGE_LIST");
-    const view = ui.run("nodeOutputView({images: {kind: 'object', items: {'0': {kind: 'image', image: 'legacy.png', mode: 'RGB'}}}}, false, 'swatches')");
-    assert.equal(walk(view).filter(item => item.tagName === "img").length, 1);
-    assert.match(text(view), /旧流程兼容/);
-    if (setup.includes("target")) assert.equal(ui.run("state.workflow.nodes.target.inputs.list.output"), "images");
-    if (setup.includes("outputs")) assert.equal(ui.run("state.workflow.outputs.legacy.output"), "images");
+    assert.equal(ui.run("nodeInfo('swatches').outputs.images"), undefined);
   }
 });
 
@@ -315,33 +310,30 @@ test("swatch edits retain the preview session for the next preview request", asy
   assert.equal(ui.run("loopUI.busy"), false);
 });
 
-test("export/import keeps dynamic indices, duplicate mapping, workflow outputs and legacy metadata", async () => {
-  for (const legacy of [false, true]) {
-    const ui = controller();
-    ui.run(`
-      editSwatchIndices('swatches', '[2,0,2]');
-      ${legacy ? "state.workflow.nodes.swatches.legacy_swatch_images = true; state.workflow.outputs.list = link('swatches', 'images');" : ""}
-      saveWorkflow();
-    `);
-    const saved = JSON.parse(await ui.blob().text());
-    assert.deepEqual(saved.workflow.nodes.swatches.inputs.indices, [2, 0, 2]);
-    assert.equal(saved.workflow.nodes.swatches.legacy_swatch_images, legacy ? true : undefined);
-    const importing = controller();
-    importing.run(`
-      globalThis.saved = ${JSON.stringify(saved)};
-      fetch = async (url, options) => {
-        const request = JSON.parse(options.body);
-        globalThis.importedPayload = request;
-        return {ok: true, text: async () => JSON.stringify({workflow: request.workflow, config: {}})};
-      };
-      state.previewSession = 'old-workflow'; state.nodeResults.swatches = {old: true};
-    `);
-    await importing.run("loadWorkflow({target: {files: [{name: 'swatches.json', text: async () => JSON.stringify(saved)}], value: 'file'}})");
-    assert.deepEqual(plain(importing.run("state.workflow")), saved.workflow);
-    assert.deepEqual(plain(importing.run("importedPayload.workflow")), saved.workflow);
-    assert.equal(importing.run("portCaption('swatches', 'outputs', 'img3')"), "img3 · index=2");
-    assert.equal(importing.run("portType('swatches', 'images')"), legacy ? "IMAGE_LIST" : undefined);
-    assert.equal(importing.run("state.previewSession"), null);
-    assert.deepEqual(plain(importing.run("state.nodeResults")), {});
-  }
+test("export/import keeps dynamic indices, duplicate mapping, workflow outputs without list compatibility", async () => {
+  const ui = controller();
+  ui.run(`
+    editSwatchIndices('swatches', '[2,0,2]');
+    saveWorkflow();
+  `);
+  const saved = JSON.parse(await ui.blob().text());
+  assert.deepEqual(saved.workflow.nodes.swatches.inputs.indices, [2, 0, 2]);
+  assert.equal(saved.workflow.nodes.swatches.legacy_swatch_images, undefined);
+  const importing = controller();
+  importing.run(`
+    globalThis.saved = ${JSON.stringify(saved)};
+    fetch = async (url, options) => {
+      const request = JSON.parse(options.body);
+      globalThis.importedPayload = request;
+      return {ok: true, text: async () => JSON.stringify({workflow: request.workflow, config: {}})};
+    };
+    state.previewSession = 'old-workflow'; state.nodeResults.swatches = {old: true};
+  `);
+  await importing.run("loadWorkflow({target: {files: [{name: 'swatches.json', text: async () => JSON.stringify(saved)}], value: 'file'}})");
+  assert.deepEqual(plain(importing.run("state.workflow")), saved.workflow);
+  assert.deepEqual(plain(importing.run("importedPayload.workflow")), saved.workflow);
+  assert.equal(importing.run("portCaption('swatches', 'outputs', 'img3')"), "img3 · index=2");
+  assert.equal(importing.run("portType('swatches', 'images')"), undefined);
+  assert.equal(importing.run("state.previewSession"), null);
+  assert.deepEqual(plain(importing.run("state.nodeResults")), {});
 });

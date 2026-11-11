@@ -1,10 +1,9 @@
-from collections.abc import Mapping
 from typing import cast
 
 from PIL import Image
 
 from ..color_regions import ColorRegionSet
-from ..node_contracts import ColorRegionSwatchesInputs, ColorSwatchOutputs, SwatchColors as SwatchColors
+from ..node_contracts import ColorRegionSwatchesInputs, ColorSwatchOutputs
 from ..port_types import RegionIndices
 from .base import Node
 
@@ -32,21 +31,12 @@ class ColorRegionSwatchesNode(Node):
     def prepare_spec(cls, spec: dict) -> None:
         # Port count must be known before graph validation, not after inference.
         spec["inputs"]["indices"] = cls.validate_indices(spec["inputs"].get("indices"))
-        if "legacy_swatch_images" in spec and type(spec["legacy_swatch_images"]) is not bool:
-            raise ValueError("legacy_swatch_images 必须是布尔值。")
 
     @classmethod
     def output_types(cls, spec: dict) -> dict[str, str]:
         indices = cls.validate_indices(spec["inputs"].get("indices"))
         return {**{f"img{position}": "RGB_IMAGE" for position in range(1, len(indices) + 1)},
-                "colors": "JSON_RECORD", **({"images": "IMAGE_LIST"} if spec.get("legacy_swatch_images") else {})}
-
-    def execute_with_spec(self, inputs: dict, spec: dict) -> Mapping[str, object]:
-        result: dict[str, object] = dict(self.execute(**inputs))
-        if spec.get("legacy_swatch_images"):
-            # Only old workflows referencing the former list port enable this.
-            result["images"] = [result[f"img{position}"] for position in range(1, len(inputs["indices"]) + 1)]
-        return result
+                "colors": "JSON_RECORD"}
 
     def execute(self, regions: ColorRegionSet, indices: RegionIndices = None) -> ColorSwatchOutputs:
         """索引从 0 开始，保留输入顺序和重复项；只生成色块，不写入文件。
