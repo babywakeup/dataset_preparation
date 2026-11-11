@@ -96,6 +96,7 @@ function controller() {
   const document = Object.assign(new EventTarget(), {
     body: new Element(),
     createElement: tag => new Element(tag),
+    createElementNS: (_, tag) => new Element(tag),
     querySelector(selector) {
       if (/^#conditional-(enabled|legacy|legacy-controls|fields|check|run|plan)$/.test(selector)) return null;
       if (!/^#[\w-]+$/.test(selector)) return this.querySelectorAll(selector)[0] || null;
@@ -191,7 +192,10 @@ function folder(ui) {
     state.workflow.nodes.folder = {class_type: 'FolderImagesNode', inputs: {dir: '/in', index: 0}};
     state.workflow.nodes.gen.inputs.image = link('folder', 'image');
     loopUI.sourceId = 'folder'; loopUI.targetId = 'save'; loopUI.enabled = true;
-    loopUI.plan = {total: 3, start_index: 0, current_path: '/in/a.png', output_dir: '/out'};
+    loopUI.plan = {total: 3, start_index: 0, current_path: '/in/a.png', output_dir: '/out',
+      executed_nodes: ['fixed', 'alt', 'folder', 'gen', 'score', 'save', 'save2'],
+      repeated_nodes: ['folder', 'gen', 'score', 'save', 'save2'], terminal_nodes: ['score', 'save', 'save2'],
+      node_roles: {fixed: 'fixed', alt: 'fixed', folder: 'source', gen: 'retry', score: 'retry', save: 'result', save2: 'result'}};
     loopUI.planKey = JSON.stringify(loopPayload());
   `);
 }
@@ -205,10 +209,63 @@ test("folder scope includes conditional scoring branches outside save ancestry",
   const score = canvasCard(ui, "score");
   ui.document.querySelector("#loop-region").append(ui.document.createElement("span"));
   ui.run("renderLoop()");
-  assert.equal(score.querySelector(".loop-role").textContent, "每张执行");
+  assert.equal(score.querySelector(".loop-role").textContent, "条件重试");
   assert.equal(score.classList.contains("loop-outside"), false);
   ui.run("delete state.workflow.conditional_loop");
+  assert.equal(ui.run("loopScope().repeated.has('score')"), false);
+  assert.equal(ui.run("loopScope().plan"), null);
+});
+
+test("batch roles follow the backend plan and stale plans never color branches", () => {
+  const ui = controller(); folder(ui);
+  ui.run("loopUI.plan.executed_nodes = ['folder', 'gen', 'save']; loopUI.plan.repeated_nodes = ['folder', 'gen', 'save']; delete loopUI.plan.node_roles.score");
   assert.equal(ui.run("loopScope().ancestors.has('score')"), false);
+  ui.run("state.workflow.nodes.gen.inputs.seed = 99");
+  assert.equal(ui.run("loopScope().order.length"), 0);
+});
+
+test("an older batch plan response cannot replace the current execution scope", async () => {
+  const ui = controller(); folder(ui);
+  ui.run(`globalThis.finishPlans = []; loopUI.planKey = null;
+    fetch = () => new Promise(resolve => finishPlans.push(plan => resolve({ok: true, text: async () => JSON.stringify(plan)})));
+    renderLoop()`);
+  const oldRequest = ui.timers.get(ui.run("loopUI.timer"))();
+  ui.run("state.workflow.nodes.gen.inputs.seed = 77; renderLoop()");
+  const currentRequest = ui.timers.get(ui.run("loopUI.timer"))();
+  ui.run("finishPlans[1]({executed_nodes:['folder','gen','save'], repeated_nodes:['folder','gen','save'], node_roles:{folder:'source',gen:'per_item',save:'result'}, terminal_nodes:['save']})");
+  await currentRequest;
+  ui.run("finishPlans[0]({executed_nodes:['score'], repeated_nodes:['score'], node_roles:{score:'result'}, terminal_nodes:['score']})");
+  await oldRequest;
+  assert.deepEqual(plain(ui.run("loopScope().order")), ['folder', 'gen', 'save']);
+});
+
+test("result and disabled controls persist metadata, invalidate plans and respect running lock", () => {
+  const ui = controller(); folder(ui);
+  const controls = ui.run("batchNodeControls('score')");
+  controls.querySelector(".result_nodes").click();
+  assert.equal(ui.run("state.workflow.batch_execution.mode"), "selected_results");
+  assert.deepEqual(plain(ui.run("state.workflow.batch_execution.result_nodes")), ['score']);
+  assert.equal(ui.run("loopUI.plan"), null);
+  ui.run("batchNodeControls('alt').querySelector('.disabled_nodes').click()");
+  assert.deepEqual(plain(ui.run("state.workflow.batch_execution.disabled_nodes")), ['alt']);
+  ui.run("batch.job = {status: 'running'}; batchNodeControls('gen').querySelector('.result_nodes').click()");
+  assert.deepEqual(plain(ui.run("state.workflow.batch_execution.result_nodes")), ['score']);
+  ui.run("batch.job = null; deleteNode('score')");
+  assert.deepEqual(plain(ui.run("state.workflow.batch_execution.result_nodes")), []);
+});
+
+test("folder trial applies every terminal output to its canvas node", async () => {
+  const ui = controller(); folder(ui);
+  ui.document.querySelector("#loop-region").append(ui.document.createElement("span"));
+  ui.run("delete state.workflow.conditional_loop");
+  canvasCard(ui, "save");
+  ui.run(`reply = {outputs: {paths: {kind: 'text', value: '/out/a.png'}},
+    executed_nodes: ['folder', 'gen', 'score', 'save', 'save2'],
+    terminal_outputs: {score: {value: {kind: 'text', value: 42}}}}`);
+  await ui.run("previewNode('save', true)");
+  assert.equal(ui.run("requests[0].url"), "/api/batch/preview");
+  assert.equal(ui.run("state.nodeResults.score.value.value"), 42);
+  assert.equal(ui.run("state.nodeResultStale.score"), undefined);
 });
 
 test("repeat boundary uses explicit multi-roots and relevant descendants, never the save", () => {

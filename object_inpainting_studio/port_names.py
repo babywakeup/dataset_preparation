@@ -161,7 +161,7 @@ def port_labels(node_type: str, inputs: dict[str, str], outputs: dict[str, str])
             if node_type == "SaveImagesNode" and key.startswith("img") and key[3:].isdigit():
                 name, role, kind = f"image_{key[3:]}", f"保存槽 {key[3:]}，任意模式", "image"
             if node_type == "SaveImagesNode" and key == "filename":
-                name, role, kind = "filename", "整组文件名，留空使用随机编号", "filename"
+                name, role, kind = "filename", "整组文件名，留空优先沿用原图名称", "filename"
             if node_type == "ColorRegionSwatchesNode" and key.startswith("img") and key[3:].isdigit():
                 name, role, kind = key, f"独立 32×32 RGB 色块 {key[3:]}", "rgb_image"
             name, role, kind = PORT_NAMES.get(node_type, {}).get(direction, {}).get(key, (name, role, kind))

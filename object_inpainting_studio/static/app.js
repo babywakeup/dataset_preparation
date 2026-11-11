@@ -258,6 +258,7 @@ function renderNode(id, spec, index) {
   card.append(header);
   const summary = Object.assign(document.createElement("p"), { className: "node-summary", textContent: `${info.help.title}：${info.help.summary}` });
   card.append(summary);
+  if (spec.class_type !== "FolderImagesNode") card.append(batchNodeControls(id));
   if (info.input_contract && info.output_contract) card.append(Object.assign(document.createElement("p"), { className: "node-contract", textContent: `入口 ${info.input_contract} → 出口 ${info.output_contract}` }));
   if (state.nodeErrors[id]) {
     card.classList.add("node-failed");
@@ -739,6 +740,7 @@ function applyJobVisualization() {
 function renderBatch() {
   applyJobVisualization();
   document.querySelectorAll(".node-delete-button").forEach(button => { button.disabled = nodeDeletionDisabled(); });
+  document.querySelectorAll(".batch-plan-control").forEach(button => { button.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".swatch-topology-control").forEach(control => { control.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".save-item-add, .save-item-remove, .save-item-name").forEach(control => { control.disabled = nodeDeletionDisabled(); });
   document.querySelectorAll(".node-batch-button").forEach(button => { button.disabled = loopUI.busy; });
@@ -757,7 +759,8 @@ function renderBatch() {
   progress.max = Math.max(1, job?.total || 0);
   progress.value = job?.processed || 0;
   document.querySelector("#batch-counts").textContent = job ? `已处理 ${job.processed} / ${job.total} · 成功 ${job.succeeded} · 失败 ${job.failed} · 跳过 ${job.skipped || 0}` : "已处理 0 / 0";
-  document.querySelector("#batch-current").textContent = job ? `当前文件：${job.current_path || "—"}\n当前节点：${job.current_node || "—"}\n出错后继续：${job.continue_on_error ? "是" : "否"}${job.current_loop_id ? `\n当前循环：${job.current_loop_index || 1} / ${job.current_loop_count || 1} · ${job.current_loop_name || job.current_loop_id} (${job.current_loop_id})` : ""}${job.max_iterations != null ? `\n条件尝试：${job.current_iteration || 0} / ${job.max_iterations}` : ""}${job.stop_reason ? `\n停止原因：${job.stop_reason}` : ""}` : "";
+  const phases = {input: "读取当前图片", retry: "当前图片条件重试", results: "处理当前图片结果", completed: "当前图片已处理"};
+  document.querySelector("#batch-current").textContent = job ? `当前文件：${job.current_path || "—"}\n图片序号：${job.current_item ? `${job.current_item.index + 1} / ${job.current_item.total}` : "—"}\n阶段：${phases[job.execution_phase] || "—"}\n当前节点：${job.current_node || "—"}\n出错后继续：${job.continue_on_error ? "是" : "否"}${job.current_loop_id ? `\n当前循环：${job.current_loop_index || 1} / ${job.current_loop_count || 1} · ${job.current_loop_name || job.current_loop_id} (${job.current_loop_id})` : ""}${job.max_iterations != null ? `\n条件尝试：${job.current_iteration || 0} / ${job.max_iterations}` : ""}${job.stop_reason ? `\n停止原因：${job.stop_reason}` : ""}` : "";
   const attempts = document.querySelector("#conditional-attempts");
   attempts.replaceChildren();
   (job?.iteration_history || []).forEach(attempt => {
@@ -789,8 +792,7 @@ async function batchRequest(operation, nodeId = null, folderTrial = false) {
   if (starting && nodeDeletionDisabled()) return;
   if (operation === "preview-loop" && validateMultiple(null, nodeId)) return;
   if ((operation === "start" || (operation === "start-condition" && folderTrial)) && (!loopUI.enabled || !loopUI.plan || loopScope().problem || nodeId !== loopUI.targetId || loopUI.planKey !== JSON.stringify(loopPayload()))) return;
-  if (operation === "start" && conditionalEnabled() && conditionalValidation(nodeId)) return;
-  if (operation === "start-condition" && (!conditionalEnabled() || conditionalValidation(nodeId))) return;
+  if (operation === "start-condition" && (!conditionalEnabled() || (!folderTrial && conditionalValidation(nodeId)))) return;
   if (batch.requesting || (starting && batchStartDisabled())) return;
   if (operation === "cancel" && batch.job?.status !== "running") return;
   clearTimeout(batch.timer);
@@ -805,7 +807,7 @@ async function batchRequest(operation, nodeId = null, folderTrial = false) {
       state.previewSession = null;
       invalidateResults();
       const url = operation === "preview-node" ? "/api/node/preview" : operation === "preview-loop" ? "/api/conditional/preview" : operation === "start-condition" ? folderTrial ? "/api/batch/preview" : "/api/conditional" : "/api/batch";
-      batch.job = await api(url, { method: "POST", body: JSON.stringify({ ...workflowPayload(), record: recordPayload(), config: currentConfig(), ...(operation === "preview-loop" ? { loop_id: nodeId } : { node_id: nodeId, continue_on_error: document.querySelector("#batch-continue-on-error").checked }) }) });
+      batch.job = await api(url, { method: "POST", body: JSON.stringify({ ...workflowPayload(), record: recordPayload(), config: currentConfig(), ...(operation === "start" || folderTrial ? {source_id: loopUI.sourceId} : {}), ...(operation === "preview-loop" ? { loop_id: nodeId } : { node_id: nodeId, continue_on_error: document.querySelector("#batch-continue-on-error").checked }) }) });
       state.activeJobId = batch.job.id;
       state.activeJobRevision = state.previewRevision;
     } else if (operation === "cancel") {
@@ -847,6 +849,7 @@ async function previewNode(nodeId, loopTrial = false) {
   const saving = state.workflow.nodes[nodeId].class_type === "SaveImagesNode";
   if (saving && nodeDeletionDisabled()) return;
   if (loopTrial && (!loopUI.enabled || !loopUI.plan || loopScope().problem)) return;
+  if (loopTrial && conditionalEnabled()) return batchRequest("start-condition", nodeId, true);
   if (saving && conditionalEnabled()) {
     conditionalUI.targetId = nodeId;
     return batchRequest("start-condition", nodeId, loopTrial);
@@ -871,7 +874,7 @@ async function previewNode(nodeId, loopTrial = false) {
   button.textContent = "Running…";
   renderBatch();
   try {
-    const result = await api(loopTrial ? "/api/batch/preview" : saving ? "/api/node/save-images" : "/api/node/preview", { method: "POST", body: JSON.stringify({ ...workflowPayload(), node_id: nodeId, record: recordPayload(), config: currentConfig(), preview_session: state.previewSession }) });
+    const result = await api(loopTrial ? "/api/batch/preview" : saving ? "/api/node/save-images" : "/api/node/preview", { method: "POST", body: JSON.stringify({ ...workflowPayload(), ...(loopTrial ? {source_id: loopUI.sourceId} : {}), node_id: nodeId, record: recordPayload(), config: currentConfig(), preview_session: state.previewSession }) });
     if (revision !== state.previewRevision) return;
     state.previewSession = result.preview_session || null;
     const executed = new Set(result.executed_nodes);
@@ -879,10 +882,17 @@ async function previewNode(nodeId, loopTrial = false) {
       if (upstreamNodes(id).some(ancestor => executed.has(ancestor))) state.nodeResultStale[id] = true;
     });
     if (visualizeEnabled() && Object.keys(result.outputs || {}).length) {
-      state.nodeResults[nodeId] = result.outputs;
-      delete state.nodePreviewStatus[nodeId];
-      delete state.nodeResultStale[nodeId];
+      const outputNode = result.node_id || nodeId;
+      state.nodeResults[outputNode] = result.outputs;
+      delete state.nodePreviewStatus[outputNode];
+      delete state.nodeResultStale[outputNode];
     }
+    if (visualizeEnabled()) Object.entries(result.terminal_outputs || {}).forEach(([id, outputs]) => {
+      if (!state.workflow.nodes[id]) return;
+      state.nodeResults[id] = outputs;
+      delete state.nodePreviewStatus[id];
+      delete state.nodeResultStale[id];
+    });
     state.selected = nodeId;
     render(); setStatus(`${saving ? "保存成功" : "测试成功"}：${nodeId}。实际执行：${result.executed_nodes.join(" → ")}。${result.reused_nodes?.length ? `复用上游：${result.reused_nodes.join("、")}。` : ""}${saving ? "本次仅保存当前张，未启动循环。遍历文件夹请点击画布顶部「运行全部 · 写入磁盘」。" : "输出已按实际内容自动显示为图像或文本。"}`);
   } catch (error) {

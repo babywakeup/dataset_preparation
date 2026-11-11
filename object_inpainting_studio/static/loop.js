@@ -33,18 +33,8 @@ function upstreamNodes(targetId) {
 }
 
 function batchUpstreamNodes(targetId) {
-  if (!state.workflow.nodes[targetId]) return [];
-  // Batch execution includes condition/end branches, even when their outputs
-  // are not wired into the save node. Match the server's condition_nodes roots.
-  const settings = state.workflow.conditional_loop;
-  const loops = Array.isArray(settings?.loops) ? settings.loops : settings ? [settings] : [];
-  const roots = [];
-  loops.forEach(item => {
-    if (Array.isArray(item?.conditions)) roots.push(...item.conditions.map(condition => condition?.node));
-    if (Array.isArray(settings?.loops) && Array.isArray(item?.end_nodes)) roots.push(...item.end_nodes);
-  });
-  roots.push(targetId);
-  return [...new Set(roots.flatMap(id => upstreamNodes(id)))];
+  return targetId === loopUI.targetId && loopUI.planKey === JSON.stringify(loopPayload())
+    ? loopUI.plan?.executed_nodes || [] : [];
 }
 
 function loopScope() {
@@ -54,22 +44,19 @@ function loopScope() {
     loopUI.enabled = false;
   }
   const sourceId = loopUI.sourceId;
-  const targets = Object.keys(nodes).filter(id => nodes[id].class_type === "SaveImagesNode" && batchUpstreamNodes(id).includes(sourceId));
-  if (!targets.includes(loopUI.targetId) && !(conditionalEnabled() && loopUI.targetId)) loopUI.targetId = targets.length === 1 ? targets[0] : null;
-  const order = batchUpstreamNodes(loopUI.targetId);
-  const repeated = new Set(sourceId ? [sourceId] : []);
-  order.forEach(id => {
-    if (Object.values(nodes[id].inputs).some(value => isLink(value) && repeated.has(value.node))) repeated.add(id);
-  });
-  const folders = order.filter(id => nodes[id].class_type === "FolderImagesNode");
+  const selected = state.workflow.batch_execution?.mode === "selected_results" ? state.workflow.batch_execution.result_nodes || [] : [];
+  const targets = Object.keys(nodes).filter(id => (selected.length ? selected.includes(id) : nodes[id].class_type === "SaveImagesNode") && upstreamNodes(id).includes(sourceId));
+  if (!targets.length && sourceId) targets.push(sourceId);
+  if (!targets.includes(loopUI.targetId) && !(conditionalEnabled() && loopUI.targetId)) loopUI.targetId = targets[0] || null;
+  const plan = loopUI.planKey === JSON.stringify(loopPayload()) ? loopUI.plan : null;
+  const order = plan?.executed_nodes || [];
+  const repeated = new Set(plan?.repeated_nodes || []);
   let problem = "";
   if (!sourceId) problem = "先添加「文件夹图片」节点，再连接处理流程和保存节点。";
   else if (!loopUI.enabled) problem = "当前为单张调试。点击文件夹上的「↻ 逐张」开启遍历。";
-  else if (!targets.length) problem = "请把文件夹输出连接到处理节点，再连接到「保存图片」节点。";
-  else if (!loopUI.targetId) problem = "存在多个保存分支，请选择本次执行的保存终点。";
+  else if (!loopUI.targetId) problem = "请选择本次逐张任务的运行入口。";
   else if (!targets.includes(loopUI.targetId)) problem = "条件任务的保存终点已失效或断开；请明确重新选择，不会自动切换保存分支。";
-  else if (folders.length !== 1) problem = "此保存终点依赖多个文件夹，无法确定逐张对应关系；请只保留一个文件夹输入。";
-  return { sourceId, targets, order, repeated, ancestors: new Set(order), problem };
+  return { sourceId, targets, order, repeated, ancestors: new Set(order), roles: plan?.node_roles || {}, plan, problem };
 }
 
 function chooseLoop(sourceId, enabled, targetId = null) {
@@ -77,6 +64,41 @@ function chooseLoop(sourceId, enabled, targetId = null) {
   loopUI.sourceId = sourceId; loopUI.enabled = enabled; loopUI.targetId = targetId;
   state.expanded = {};
   render();
+}
+
+function batchExecutionOptions() {
+  return state.workflow.batch_execution ||= {mode: "all_terminals", result_nodes: [], disabled_nodes: []};
+}
+
+function batchExecutionChanged() {
+  clearTimeout(loopUI.timer);
+  loopUI.plan = null; loopUI.planKey = null; loopUI.error = "";
+  loopUI.targetId = null;
+  invalidateResults(); render();
+}
+
+function batchNodeControls(id) {
+  const box = Object.assign(document.createElement("div"), {className: "batch-node-controls"});
+  const options = state.workflow.batch_execution || {};
+  for (const [field, activeText, inactiveText] of [["result_nodes", "取消结果", "作为结果"], ["disabled_nodes", "启用分支", "禁用分支"]]) {
+    const active = (options[field] || []).includes(id);
+    const button = Object.assign(document.createElement("button"), {
+      type: "button", className: `batch-plan-control ${field}`, textContent: active ? activeText : inactiveText,
+      disabled: nodeDeletionDisabled(),
+    });
+    button.setAttribute("aria-pressed", String(active));
+    button.title = field === "result_nodes" ? "作为逐张任务结果；首次标记切换到指定结果模式" : "逐张任务排除此节点及其下游分支";
+    button.onclick = () => {
+      if (nodeDeletionDisabled()) return;
+      const current = batchExecutionOptions();
+      const values = current[field] || [];
+      current[field] = values.includes(id) ? values.filter(node => node !== id) : [...values, id];
+      if (field === "result_nodes") current.mode = "selected_results";
+      batchExecutionChanged();
+    };
+    box.append(button);
+  }
+  return box;
 }
 
 function folderLoopSwitch(id) {
@@ -88,21 +110,23 @@ function folderLoopSwitch(id) {
     const button = Object.assign(document.createElement("button"), { textContent: text, disabled: loopUI.busy });
     button.dataset.loopMode = enabled ? "each" : "single";
     button.setAttribute("aria-pressed", String(enabled === active));
-    button.title = enabled ? "对文件夹中的每张图片执行通往保存终点的流程" : "仅测试 index 指定的当前图片";
+    button.title = enabled ? "对文件夹中的每张图片执行下游所有末端分支" : "仅测试 index 指定的当前图片";
     button.onclick = () => chooseLoop(id, enabled, loopUI.sourceId === id ? loopUI.targetId : null);
     modes.append(button);
   });
   return modes;
 }
 
-function loopPayload() { return { ...workflowPayload(), node_id: loopUI.targetId }; }
+function loopPayload() { return { ...workflowPayload(), node_id: loopUI.targetId || loopUI.sourceId, source_id: loopUI.sourceId }; }
 
 function updateLoopPlan(scope) {
-  const conditionalProblem = conditionalEnabled() ? conditionalValidation(loopUI.targetId) : "";
-  const key = scope.problem || conditionalProblem ? null : JSON.stringify(loopPayload());
+  const key = scope.problem ? null : JSON.stringify(loopPayload());
   if (key === loopUI.planKey) return;
   clearTimeout(loopUI.timer);
-  loopUI.planKey = key; loopUI.plan = null; loopUI.checking = false; loopUI.error = conditionalProblem;
+  loopUI.planKey = key; loopUI.plan = null; loopUI.checking = false; loopUI.error = "";
+  document.querySelectorAll(".loop-edge, .shared-edge").forEach(edge => {
+    edge.classList.remove("loop-edge"); edge.classList.remove("shared-edge");
+  });
   if (!key) return;
   loopUI.timer = setTimeout(async () => {
     loopUI.checking = true; renderBatch();
@@ -114,7 +138,7 @@ function updateLoopPlan(scope) {
       if (key !== loopUI.planKey) return;
       loopUI.error = error.message;
     } finally {
-      if (key === loopUI.planKey) { loopUI.checking = false; renderBatch(); }
+      if (key === loopUI.planKey) { loopUI.checking = false; renderBatch(); renderEdges(); }
     }
   }, 250);
 }
@@ -131,15 +155,19 @@ function renderLoop() {
   const targetsKey = JSON.stringify([scope.targets, staleTarget]);
   if (target.dataset.optionsKey !== targetsKey) {
     target.dataset.optionsKey = targetsKey;
-    target.replaceChildren(new Option(scope.targets.length ? "选择保存终点…" : "尚未连接保存节点", ""));
+    target.replaceChildren(new Option(scope.targets.length ? "选择运行入口…" : "尚未连接保存节点", ""));
     scope.targets.forEach(id => target.add(new Option(id, id)));
     if (staleTarget) target.add(new Option(`失效配置：${staleTarget}`, staleTarget));
   }
   target.value = loopUI.targetId || ""; target.disabled = !enabled || nodeDeletionDisabled();
-  const plan = loopUI.plan;
-  document.querySelector("#loop-summary").textContent = plan ? `↻ ${plan.total} 张输入 × ${conditionalEnabled() ? "每张条件重试，通过后保存" : "每张执行一次"} · 从第 ${plan.start_index + 1} 张开始（index=${plan.start_index}）` : scope.problem || (loopUI.error ? "运行前检查未通过" : "正在检查文件数量和保存目录…");
+  const plan = scope.plan;
+  const resultMode = document.querySelector("#batch-result-mode");
+  resultMode.value = state.workflow.batch_execution?.mode || "all_terminals";
+  resultMode.disabled = nodeDeletionDisabled();
+  document.querySelector("#loop-summary").textContent = plan ? `↻ ${plan.total} 张输入 · ${plan.terminal_nodes?.length || 0} 个结果 · ${plan.conditional_loop ? "每张先验收，再处理结果" : "每张执行结果分支"} · index=${plan.start_index}` : scope.problem || (loopUI.error ? "运行前检查未通过" : "正在检查文件数量和执行范围…");
   const message = document.querySelector("#loop-message");
-  message.textContent = loopUI.error || (plan ? `当前文件：${plan.current_path}\n保存到：${plan.output_dir} · 试跑也会写入磁盘` : "");
+  const destinations = Object.entries(plan?.output_dirs || {}).map(([id, dir]) => `${id}: ${dir}`).join("；");
+  message.textContent = loopUI.error || (plan ? `当前文件：${plan.current_path}\n${destinations || plan.output_dir ? `保存到：${destinations || plan.output_dir}` : plan.write_nodes?.length ? "结果包含写盘节点" : "当前结果无需保存"} · 按后端计划执行` : "");
   message.classList.toggle("error", Boolean(loopUI.error));
   const steps = document.querySelector("#loop-steps"); steps.replaceChildren();
   if (enabled && loopUI.targetId) scope.order.filter(id => scope.repeated.has(id)).forEach((id, index) => {
@@ -149,6 +177,9 @@ function renderLoop() {
   });
   const disabled = !enabled || !plan || Boolean(scope.problem) || batchStartDisabled() || loopUI.busy;
   document.querySelector("#loop-trial").disabled = disabled; document.querySelector("#loop-run").disabled = disabled;
+  const writes = !plan || (plan.write_nodes || []).length > 0;
+  document.querySelector("#loop-trial").textContent = writes ? "试跑当前张 · 写入磁盘" : "试跑当前张 · 计算结果";
+  document.querySelector("#loop-run").textContent = writes ? "运行全部 · 写入磁盘" : "运行全部 · 计算结果";
   document.querySelector("#loop-focus").disabled = !scope.sourceId;
   document.querySelector("#loop-arrange").disabled = !loopUI.targetId;
   document.querySelector("#loop-check").disabled = !enabled || Boolean(scope.problem) || nodeDeletionDisabled();
@@ -158,9 +189,10 @@ function renderLoop() {
     if (!state.workflow.nodes[id]) return;
     card.classList.toggle("loop-member", enabled && scope.repeated.has(id));
     card.classList.toggle("loop-shared", enabled && scope.ancestors.has(id) && !scope.repeated.has(id));
-    card.classList.toggle("loop-outside", enabled && Boolean(loopUI.targetId) && !scope.ancestors.has(id));
-    card.classList.toggle("loop-current", enabled && batchActive() && !batch.uncertain && batch.job?.source_id === scope.sourceId && batch.job?.target_id === loopUI.targetId && batch.job.current_node === id);
-    card.querySelector(".loop-role").textContent = !enabled ? "" : scope.repeated.has(id) ? id === scope.sourceId ? "↻ 循环输入" : id === loopUI.targetId ? "保存终点" : "每张执行" : scope.ancestors.has(id) ? "固定输入 · 每轮读取" : "不执行";
+    card.classList.toggle("loop-outside", enabled && Boolean(plan) && !scope.ancestors.has(id));
+    card.classList.toggle("loop-current", enabled && batchActive() && !batch.uncertain && batch.job?.source_id === scope.sourceId && batch.job.current_node === id);
+    const roles = {source: "↻ 循环输入", retry: "条件重试", result: "结果节点", per_item: "每张执行", fixed: "固定输入 · 每轮读取"};
+    card.querySelector(".loop-role").textContent = !enabled ? "" : !plan ? "等待执行计划" : roles[scope.roles[id]] || "不执行";
     const path = card.querySelector(".node-path");
     if (path) {
       path.hidden = !enabled;
@@ -254,6 +286,11 @@ function arrangeLoop() {
   render(); focusLoopNode(scope.sourceId);
 }
 document.querySelector("#loop-target").onchange = event => { if (nodeDeletionDisabled()) return; loopUI.targetId = event.target.value || null; render(); };
+document.querySelector("#batch-result-mode").onchange = event => {
+  if (nodeDeletionDisabled()) return;
+  batchExecutionOptions().mode = event.target.value;
+  batchExecutionChanged();
+};
 document.querySelector("#loop-focus").onclick = () => { if (loopUI.sourceId) focusLoopNode(loopUI.sourceId); };
 document.querySelector("#loop-arrange").onclick = arrangeLoop;
 document.querySelector("#loop-check").onclick = () => { loopUI.planKey = null; renderLoop(); };

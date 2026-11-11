@@ -136,8 +136,8 @@ function validateMultiple(targetId = conditionalUI.targetId, previewLoopId = nul
     if (Object.values(state.workflow.outputs || {}).some(v => isLink(v) && body.has(v.node) && (previewLoopId === null || !exits.has(v.node)))) return error("循环体输出不能直接暴露为工作流输出，请通过保存目标。");
     body.forEach(id => occupied.add(id)); regions.push({ item, body });
   }
-  const saveAncestors = new Set(upstreamNodes(targetId));
-  if (previewLoopId === null && regions.some(r => ![...r.body].some(id => saveAncestors.has(id)))) return "每个循环必须通过数据路径关联最终保存目标。";
+  const saveAncestors = new Set(loopUI.enabled ? batchUpstreamNodes(targetId) : upstreamNodes(targetId));
+  if (previewLoopId === null && !loopUI.enabled && regions.some(r => ![...r.body].some(id => saveAncestors.has(id)))) return "每个循环必须通过数据路径关联最终保存目标。";
   const pending = new Set(regions);
   while (pending.size) {
     const ready = [...pending].find(r => ![...pending].some(other => other !== r && [...r.body].some(id => upstreamNodes(id).some(n => other.body.has(n)))));

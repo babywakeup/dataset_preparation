@@ -8,6 +8,9 @@ function removeWorkflowNode(workflow, nodeId, catalog) {
   const disconnected = [];
   const removedOutputs = [];
   delete workflow.nodes[nodeId];
+  for (const field of ["result_nodes", "disabled_nodes"]) {
+    if (Array.isArray(workflow.batch_execution?.[field])) workflow.batch_execution[field] = workflow.batch_execution[field].filter(id => id !== nodeId);
+  }
   Object.entries(workflow.nodes).forEach(([id, spec]) => {
     const defaults = catalog[spec.class_type]?.input_defaults || {};
     Object.entries(spec.inputs).forEach(([port, binding]) => {

@@ -304,10 +304,14 @@ def node_preview_graph(definition: dict | None, node_id: str, extra_nodes=()) ->
     visit(node_id)
     for extra in extra_nodes:
         visit(extra)
-    return NodeGraph({"nodes": selected, "outputs": {}})
+    graph = NodeGraph({"nodes": selected, "outputs": {}})
+    from .naming import infer_original_filenames
+    infer_original_filenames(graph)
+    return graph
 
 
-def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str | None = None) -> dict:
+def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str | None = None,
+                         *, allowed_write_nodes=()) -> dict:
     context = {}
     bindings = [binding for spec in graph.nodes.values() for binding in spec["inputs"].values()]
     if {"context": "config"} in bindings:
@@ -316,7 +320,7 @@ def node_preview_context(graph: NodeGraph, payload: dict, allowed_save_node: str
         context["record"] = record_from_payload(payload.get("record"))
     for node_id, spec in graph.nodes.items():
         node_class = graph.registry[spec["class_type"]]
-        if getattr(node_class, "SIDE_EFFECTS", False) and node_id != allowed_save_node:
+        if getattr(node_class, "SIDE_EFFECTS", False) and node_id != allowed_save_node and node_id not in allowed_write_nodes:
             raise ValueError(f"Node {node_id}: file-writing nodes are not allowed during preview.")
         for port, expected in graph.input_types[node_id].items():
             binding = spec["inputs"][port]
@@ -480,32 +484,71 @@ def start_conditional(payload: dict):
 
 def prepare_batch(payload: dict):
     try:
+        from .batch_scope import batch_options, select_batch_results, upstream_ids
+
         target_id = payload["node_id"]
-        conditional = None
-        if loop_settings(payload.get("workflow")) is not None:
-            graph, conditional = prepare_conditional(payload)
-        else:
-            graph = node_preview_graph(payload.get("workflow"), target_id)
-        if graph.nodes[target_id]["class_type"] != "SaveImagesNode":
-            raise ValueError("请从 SaveImagesNode 启动批量保存。")
-        sources = [node_id for node_id, spec in graph.nodes.items() if spec["class_type"] == "FolderImagesNode"]
+        definition = payload.get("workflow")
+        if isinstance(definition, dict) and "workflow" in definition:
+            definition = definition["workflow"]
+        if definition is None:
+            definition = json.loads(DEFAULT_WORKFLOW.read_text())
+        if not isinstance(definition, dict) or not isinstance(definition.get("nodes"), dict):
+            raise ValueError("Workflow must contain a nodes object.")
+        settings = loop_settings(definition)
+        initial_mode, selected_results, _ = batch_options(definition)
+        extra = condition_nodes(settings) if settings is not None and initial_mode != "selected_results" else []
+        roots = selected_results if initial_mode == "selected_results" and selected_results else [target_id, *extra]
+        candidates = upstream_ids(definition, roots) if not payload.get("source_id") else {payload["source_id"]}
+        sources = [node for node in candidates if definition["nodes"].get(node, {}).get("class_type") == "FolderImagesNode"]
         if len(sources) != 1:
             raise ValueError("保存节点的上游必须连接且只能连接一个文件夹图片循环输入节点。")
         source_id = sources[0]
+        terminals, connected, blocked, mode = select_batch_results(definition, source_id)
+        if mode == "selected_results" and settings is not None and "loops" in settings:
+            from .conditional_loop import required_preview_settings
+            required = set()
+            for node in terminals:
+                selected = required_preview_settings(definition, settings, node_id=node)
+                required.update(item["id"] for item in (selected or {}).get("loops", []))
+            settings = {"loops": [item for item in settings["loops"] if item["id"] in required]} if required else None
+            extra = condition_nodes(settings) if settings is not None else []
+        elif mode == "selected_results" and settings is not None:
+            starts = settings.get("start_nodes", [])
+            if isinstance(starts, list) and not set(starts) & connected:
+                settings = None
+            extra = condition_nodes(settings) if settings is not None else []
+        if upstream_ids(definition, [*terminals, *extra]) & blocked:
+            raise ValueError("结果或条件依赖已禁用节点，请启用该分支或修改结果 / 循环。")
+        if target_id not in terminals:
+            target_id = next((node for node in terminals if definition["nodes"][node].get("class_type") == "SaveImagesNode"), terminals[0])
+        graph = node_preview_graph(definition, target_id, [*extra, *[n for n in definition["nodes"] if n in connected]])
+        graph.batch_terminals = terminals
+        graph.batch_result_mode = mode
+        graph.batch_disabled_nodes = blocked
+        graph.batch_write_nodes = {node for node, spec in graph.nodes.items()
+                                   if getattr(graph.registry[spec["class_type"]], "SIDE_EFFECTS", False)}
+        if sum(spec["class_type"] == "FolderImagesNode" for spec in graph.nodes.values()) != 1:
+            raise ValueError("逐张分支只能连接一个文件夹图片循环输入节点。")
+        conditional = build_conditional_plan(graph, target_id, settings, definition) if settings is not None else None
         inputs = graph.nodes[source_id]["inputs"]
         if any(isinstance(value, dict) for value in inputs.values()):
             raise ValueError("批量运行时，文件夹节点的 dir、recursive、index 请直接填写，不要连接其他节点。")
-        output_dir = graph.nodes[target_id]["inputs"]["dir"]
-        if not isinstance(output_dir, str) or not output_dir.strip():
-            raise ValueError("批量运行前请在保存节点直接填写 dir 输出目录。")
-        output_root = Path(output_dir).expanduser().resolve()
         input_root = Path(inputs["dir"]).expanduser().resolve()
-        if input_root.is_relative_to(output_root):
-            raise ValueError("保存目录不能是输入目录或其上级目录；请选择单独的输出目录。")
+        output_roots = []
+        for node, spec in graph.nodes.items():
+            if spec["class_type"] != "SaveImagesNode":
+                continue
+            output_dir = spec["inputs"]["dir"]
+            if not isinstance(output_dir, str) or not output_dir.strip():
+                raise ValueError(f"Node {node}: 批量运行前请在保存节点直接填写 dir 输出目录。")
+            output_root = Path(output_dir).expanduser().resolve()
+            if input_root.is_relative_to(output_root):
+                raise ValueError("保存目录不能是输入目录或其上级目录；请选择单独的输出目录。")
+            output_roots.append(output_root)
         paths = [
             path
             for path in scan_folder(inputs["dir"], inputs["recursive"])
-            if not path.resolve().is_relative_to(output_root)
+            if not any(path.resolve().is_relative_to(root) for root in output_roots)
         ]
         start_index = inputs["index"]
         if type(start_index) is not int or not 0 <= start_index < len(paths):
@@ -513,9 +556,6 @@ def prepare_batch(payload: dict):
         continue_on_error = payload.get("continue_on_error", True)
         if not isinstance(continue_on_error, bool):
             raise ValueError("continue_on_error 必须是布尔值。")
-        for node_id, spec in graph.nodes.items():
-            if getattr(graph.registry[spec["class_type"]], "SIDE_EFFECTS", False) and node_id != target_id:
-                raise ValueError("循环范围内只能有所选的一个保存节点。")
         return graph, source_id, target_id, paths, start_index, continue_on_error, conditional
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -523,6 +563,7 @@ def prepare_batch(payload: dict):
 
 @app.post("/api/batch/plan")
 def plan_batch(payload: dict):
+    from .batch_scope import describe_batch
     graph, source_id, target_id, paths, start_index, _, conditional = prepare_batch(payload)
     return {
         "source_id": source_id,
@@ -530,8 +571,8 @@ def plan_batch(payload: dict):
         "total": len(paths) - start_index,
         "start_index": start_index,
         "current_path": str(paths[start_index]),
-        "output_dir": graph.nodes[target_id]["inputs"]["dir"],
-        "executed_nodes": list(graph.order),
+        "output_dir": graph.nodes[target_id]["inputs"].get("dir", ""),
+        **describe_batch(graph, source_id, target_id, conditional),
         "conditional_loop": conditional.describe() if conditional is not None else None,
     }
 
@@ -541,7 +582,8 @@ def preview_batch(payload: dict):
     graph, source_id, target_id, paths, start_index, _, conditional = prepare_batch(payload)
     try:
         visualize = visualization_enabled(payload)
-        context = node_preview_context(graph, payload, allowed_save_node=target_id)
+        context = node_preview_context(graph, payload, allowed_save_node=target_id,
+                                       allowed_write_nodes=graph.batch_write_nodes)
         if conditional is not None:
             # Use the same task lock as normal batch / single-image retries.
             # Trial is deliberately asynchronous too: no duplicate long jobs
@@ -552,12 +594,17 @@ def preview_batch(payload: dict):
             return job
         execution = graph.start(context, allow_side_effects=True)
         execution.cache[source_id] = folder_image(paths[start_index], start_index, len(paths))
-        results = execution.get_node(target_id)
+        from .batch_scope import finish_batch_outputs
+        completed = finish_batch_outputs(execution, target_id)
+        results = execution.cache[target_id]
         return {
             "node_id": target_id,
             "outputs": {name: serialize_node_output(value) for name, value in results.items()}
                        if visualize else {},
             "executed_nodes": list(execution.cache),
+            "terminal_outputs": {node: {name: serialize_node_output(value) for name, value in values.items()}
+                                 for node, values in completed["preview"].items()} if visualize else {},
+            "paths_by_node": completed["paths_by_node"],
         }
     except (KeyError, OSError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -567,7 +614,8 @@ def preview_batch(payload: dict):
 def start_batch(payload: dict):
     graph, source_id, target_id, paths, start_index, continue_on_error, conditional = prepare_batch(payload)
     try:
-        context = node_preview_context(graph, payload, allowed_save_node=target_id)
+        context = node_preview_context(graph, payload, allowed_save_node=target_id,
+                                       allowed_write_nodes=graph.batch_write_nodes)
         return BATCH_JOBS.start(graph, context, source_id, target_id, paths, start_index, continue_on_error,
                        conditional=conditional, preview_serializer=serialize_node_output,
                        visualize=visualization_enabled(payload))

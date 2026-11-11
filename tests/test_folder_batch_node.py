@@ -194,7 +194,9 @@ class FolderBatchTests(unittest.TestCase):
         job = self.start()
         self.assertEqual((job["status"], job["succeeded"], job["failed"]), ("completed", 2, 1))
         self.assertIn("error", job["results"][1])
-        job = self.start(continue_on_error=False)
+        workflow = self.workflow()
+        workflow["nodes"]["save"]["inputs"]["dir"] = str(self.root / "stop-on-corrupt")
+        job = self.start(workflow, continue_on_error=False)
         self.assertEqual((job["status"], job["processed"], job["succeeded"], job["failed"]), ("failed", 2, 1, 1))
         self.assertTrue(job["error"])
 

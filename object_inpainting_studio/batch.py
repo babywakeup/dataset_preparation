@@ -7,6 +7,7 @@ from object_inpainting.graph import GraphExecution, GraphExecutionCancelled, Nod
 from object_inpainting.nodes.folder_images import folder_image
 
 from .conditional_loop import run_conditional
+from .batch_scope import describe_batch, finish_batch_outputs
 
 
 LOGGER = logging.getLogger(__name__)
@@ -17,13 +18,16 @@ class BatchCancelled(GraphExecutionCancelled):
 
 
 class BatchExecution(GraphExecution):
-    def __init__(self, graph, context, cancel):
+    def __init__(self, graph, context, cancel, progress=None):
         super().__init__(graph, context, allow_side_effects=True)
         self.cancel = cancel
+        self.progress = progress
 
     def _execute(self, node_id):
         if self.cancel.is_set():
             raise BatchCancelled()
+        if self.progress is not None and node_id not in self.cache:
+            self.progress({"current_node": node_id})
         return super()._execute(node_id)
 
     def _resolve(self, binding):
@@ -102,6 +106,10 @@ class BatchJobs:
                 "visualize": visualize,
                 "loop_previews": {},
                 "visualization_revision": 0,
+                "execution_plan": describe_batch(graph, source_id, target_id, conditional)
+                                  if hasattr(graph, "batch_terminals") else None,
+                "execution_phase": "input",
+                "current_item": None,
             }
             if getattr(conditional, "preview_loop_id", None) is not None:
                 job.update(preview_loop_id=conditional.preview_loop_id,
@@ -141,6 +149,10 @@ class BatchJobs:
             else:
                 snapshot = None
             with self.lock:
+                node = update.get("current_node")
+                if node is not None:
+                    job["execution_phase"] = ("input" if node == source_id else "retry"
+                                               if conditional is not None and node in conditional.body else "results")
                 job.update(update)
                 if snapshot is not None:
                     job["loop_previews"][snapshot["loop_id"]] = snapshot
@@ -153,6 +165,9 @@ class BatchJobs:
                 path = paths[index]
                 with self.lock:
                     job["current_path"] = str(path) if path is not None else "current"
+                    job["execution_phase"] = "input"
+                    job["current_item"] = {"id": f"{job_id}:{index}", "index": index,
+                                           "total": len(paths), "path": job["current_path"], "status": "running"}
                     job["current_node"] = source_id
                     job["current_iteration"] = 0
                     job["current_loop_id"] = None
@@ -179,25 +194,33 @@ class BatchJobs:
                         result = {"source": str(path) if path is not None else "current",
                                   **run_conditional(conditional, context, cancel, progress, initial)}
                         if "preview" in result:
+                            if hasattr(graph, "batch_terminals"):
+                                progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
+                                          "accepted": result.get("accepted", False), "outputs": result["preview"]}})
                             result["preview"] = serialize(result["preview"])
                     else:
-                        execution = BatchExecution(graph, context, cancel)
+                        execution = BatchExecution(graph, context, cancel, progress)
                         try:
                             execution.cache[source_id] = folder_image(path, index, len(paths))
                         except Exception as error:
                             raise NodeExecutionError(source_id, graph.nodes[source_id]["class_type"], error) from error
-                        for node_id in graph.order:
+                        writers = getattr(graph, "batch_write_nodes", {target_id})
+                        ordered = [n for n in graph.order if n not in writers]
+                        for node_id in ordered:
                             with self.lock:
                                 job["current_node"] = node_id
                             execution.get_node(node_id)
                             progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
                                       "accepted": node_id == target_id,
                                       "outputs": {node_id: execution.cache[node_id]}}})
-                        result = {"source": str(path), "paths": execution.cache[target_id]["paths"],
-                                  "preview": serialize({target_id: execution.cache[target_id]})}
+                        outputs = finish_batch_outputs(execution, target_id)
+                        progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
+                                  "accepted": True, "outputs": outputs["preview"]}})
+                        result = {"source": str(path), **outputs, "preview": serialize(outputs["preview"])}
                 except GraphExecutionCancelled:
                     with self.lock:
                         job["stop_reason"] = "cancelled"
+                        job["current_item"]["status"] = "cancelled"
                     break
                 except Exception as error:
                     LOGGER.exception("批量任务 %s，输入 %s 失败：%s", job_id, path, error)
@@ -210,6 +233,10 @@ class BatchJobs:
                     if isinstance(error, NodeExecutionError):
                         result["node_error"] = error.as_dict()
                 with self.lock:
+                    status = "failed" if "error" in result else "skipped" if result.get("skipped") else "succeeded"
+                    job["current_item"]["status"] = status
+                    job["execution_phase"] = "completed"
+                    result.update(item_id=job["current_item"]["id"], item_index=index)
                     job["results"].append(result)
                     job["processed"] += 1
                     job["failed" if "error" in result else "skipped" if result.get("skipped") else "succeeded"] += 1

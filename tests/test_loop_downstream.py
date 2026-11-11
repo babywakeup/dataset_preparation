@@ -399,8 +399,8 @@ class LoopDownstreamTests(unittest.TestCase):
                 workflow = self.workflow(folder=True)
                 workflow["nodes"]["save"]["inputs"]["dir"] = str(self.root / endpoint.rsplit("/", 1)[-1])
                 job = self.post_job(endpoint, self.api_payload(workflow))
-                self.assertEqual(job["visualization_revision"], 4)
-                self.assertEqual(set(job["loop_previews"]), {"loop1", "loop2"})
+                self.assertEqual(job["visualization_revision"], 5)
+                self.assertEqual(set(job["loop_previews"]), {"loop1", "loop2", "batch"})
                 self.assertEqual(job["status"], "completed")
 
     def test_folder_images_do_not_accumulate_visual_history(self):
@@ -408,8 +408,8 @@ class LoopDownstreamTests(unittest.TestCase):
             Image.new("RGB", (3, 2), (20, 0, 40)).save(self.input / f"{index}.png")
         job = self.post_job("/api/batch", self.api_payload(self.workflow(folder=True)))
         self.assertEqual(job["processed"], 2)
-        self.assertEqual(job["visualization_revision"], 8)
-        self.assertEqual(set(job["loop_previews"]), {"loop1", "loop2"})
+        self.assertEqual(job["visualization_revision"], 10)
+        self.assertEqual(set(job["loop_previews"]), {"loop1", "loop2", "batch"})
         self.assertTrue(all("preview" not in entry for result in job["results"] for entry in result["history"]))
 
     def test_nonconditional_folder_batch_publishes_visual_outputs(self):

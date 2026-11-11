@@ -47,7 +47,8 @@
           <div class="loop-heading"><strong id="loop-title">↻ 文件夹逐张处理</strong><span id="loop-mode">单张调试</span></div>
           <p id="loop-summary">添加文件夹节点，开启「↻ 逐张」，自动标出重复执行的路径。</p>
           <div class="loop-controls">
-            <label>保存终点<select id="loop-target" aria-label="循环保存终点"></select></label>
+            <label>结果范围<select id="batch-result-mode" aria-label="逐张结果范围"><option value="all_terminals">全部末端（默认）</option><option value="selected_results">指定结果节点</option></select></label>
+            <label>运行入口<select id="loop-target" aria-label="循环保存终点" title="从此节点定位文件夹，执行该文件夹下游所有末端分支"></select></label>
             <button id="loop-focus">定位流程</button>
             <button id="loop-arrange">整理流程</button>
             <button id="loop-check">重新检查</button>

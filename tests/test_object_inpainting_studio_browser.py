@@ -56,6 +56,68 @@ class StudioBrowserTests(unittest.TestCase):
         self.page.goto(self.base_url + "/")
         expect(self.page.locator("#status")).to_contain_text("Ready.")
 
+    def test_folder_all_terminal_branches_run_and_show_score_without_condition(self):
+        folder = self.fixture.root / "terminal-input"
+        folder.mkdir()
+        Image.new("RGB", (80, 60), (25, 50, 255)).save(folder / "one.png")
+        workflow = {"nodes": {
+            "folder": {"class_type": "FolderImagesNode", "inputs": {"dir": str(folder)}},
+            "demo": {"class_type": "LoopDemoImageNode", "inputs": {
+                "image": {"node": "folder", "output": "image"}, "seed": 0}},
+            "score": {"class_type": "LoopDemoScoreNode", "inputs": {
+                "image": {"node": "demo", "output": "image"}}},
+            **{name: {"class_type": "SaveImagesNode", "inputs": {
+                "img1": {"node": "demo", "output": "image"},
+                "dir": str(self.fixture.root / name)}} for name in ("save", "save2")},
+        }, "outputs": {}}
+        self.page.evaluate("""workflow => {
+            state.workflow = workflow; state.layout = {}; state.nodeResults = {};
+            restoreLoop({sourceId: 'folder', targetId: 'save', enabled: true}); render();
+        }""", workflow)
+        expect(self.page.locator('[data-node-id="score"] .loop-role')).to_have_text("结果节点")
+        expect(self.page.locator("#loop-run")).to_be_enabled()
+        with patch("object_inpainting.nodes.loop_demo.time.sleep"):
+            self.page.locator("#loop-run").click()
+            self.page.wait_for_function("batch.job?.status === 'completed'")
+        self.page.wait_for_function("state.nodeResults.score?.score?.value === 0")
+        self.assertEqual(set(self.page.evaluate("Object.keys(batch.job.results[0].paths_by_node)")), {"save", "save2"})
+        for name in ("save", "save2"):
+            self.assertEqual(len(list((self.fixture.root / name).rglob("*.png"))), 1)
+            self.assertTrue((self.fixture.root / name / "img1" / "one.png").exists())
+        self.assertEqual(self.errors, [])
+
+    def test_batch_result_selection_disable_and_authoritative_plan_without_save(self):
+        folder = self.fixture.root / "selected-input"
+        folder.mkdir()
+        Image.new("RGB", (80, 60), "blue").save(folder / "one.png")
+        output = self.fixture.root / "must-not-be-created"
+        workflow = {"nodes": {
+            "folder": {"class_type": "FolderImagesNode", "inputs": {"dir": str(folder)}},
+            "demo": {"class_type": "LoopDemoImageNode", "inputs": {"image": {"node": "folder", "output": "image"}, "seed": 0}},
+            "score": {"class_type": "LoopDemoScoreNode", "inputs": {"image": {"node": "demo", "output": "image"}}},
+            "unfinished": {"class_type": "LoopDemoScoreNode", "inputs": {"image": {"node": "demo", "output": "value"}}},
+            "save": {"class_type": "SaveImagesNode", "inputs": {"img1": {"node": "demo", "output": "image"}, "dir": str(output)}},
+        }, "outputs": {}}
+        self.page.evaluate("""workflow => {
+            state.workflow = workflow; state.layout = {}; state.nodeResults = {};
+            restoreLoop({sourceId: 'folder', targetId: 'save', enabled: true}); render();
+        }""", workflow)
+        self.page.locator('[data-node-id="unfinished"] .disabled_nodes').click()
+        expect(self.page.locator("#loop-run")).to_be_enabled()
+        expect(self.page.locator('[data-node-id="unfinished"] .loop-role')).to_have_text("不执行")
+        self.page.locator('[data-node-id="score"] .result_nodes').click()
+        expect(self.page.locator("#batch-result-mode")).to_have_value("selected_results")
+        expect(self.page.locator("#loop-run")).to_be_enabled()
+        expect(self.page.locator('[data-node-id="save"] .loop-role')).to_have_text("不执行")
+        with patch("object_inpainting.nodes.loop_demo.time.sleep"):
+            self.page.locator("#loop-run").click()
+            self.page.wait_for_function("batch.job?.status === 'completed'")
+        self.page.wait_for_function("state.nodeResults.score?.score?.value === 0")
+        self.assertFalse(output.exists())
+        self.assertEqual(self.page.evaluate("batch.job.current_item.status"), "succeeded")
+        self.assertEqual(self.page.evaluate("Object.keys(batch.job.results[0].preview)"), ["score"])
+        self.assertEqual(self.errors, [])
+
     def test_cpu_demo_previews_each_loop_without_save_and_keeps_failed_last_image(self) -> None:
         self.page.evaluate("""() => {
             state.workflow = {nodes: {}, outputs: {}};
@@ -996,7 +1058,7 @@ class StudioBrowserTests(unittest.TestCase):
         saved_path = self.fixture.root / "loop-saved.json"
         event.value.save_as(saved_path)
         self.assertEqual(
-            json.loads(saved_path.read_text())["loop"], {"sourceId": "folder", "targetId": "save", "enabled": True}
+            json.loads(saved_path.read_text())["loop"], {"sourceId": "folder", "targetId": "save", "enabled": True, "conditionalTargetId": None}
         )
         self.page.locator("#new-workflow").click()
         self.page.locator("#load-workflow").set_input_files(saved_path)
@@ -1007,8 +1069,9 @@ class StudioBrowserTests(unittest.TestCase):
         self.assertEqual(len(list(output.glob("*.png"))), 1)
         self.page.locator("#loop-run").click()
         expect(self.page.locator("#batch-status")).to_contain_text("已完成")
-        expect(self.page.locator("#batch-counts")).to_contain_text("成功 2")
-        self.assertEqual(len(list(output.glob("*.png"))), 3)
+        expect(self.page.locator("#batch-counts")).to_contain_text("成功 1")
+        expect(self.page.locator("#batch-counts")).to_contain_text("失败 1")
+        self.assertEqual(len(list(output.glob("*.png"))), 2)
         self.assertEqual(self.errors, [])
 
     def test_save_node_explicitly_distinguishes_single_save_from_loop_run(self):
@@ -1030,7 +1093,7 @@ class StudioBrowserTests(unittest.TestCase):
         expect(self.page.locator("#batch-counts")).to_contain_text("已处理 2 / 2")
         expect(self.page.locator("#batch-status")).to_contain_text("已完成")
         self.assertTrue(any(method == "POST" and url.endswith("/api/batch") for method, url in requests))
-        self.assertEqual(len(list(output.glob("*.png"))), 3)
+        self.assertEqual(len(list(output.glob("*.png"))), 2)
         self.assertEqual(self.errors, [])
 
     def test_loop_revalidates_edits_and_disables_unsafe_output(self):
@@ -1066,7 +1129,7 @@ class StudioBrowserTests(unittest.TestCase):
         expect(self.page.locator("#loop-trial")).to_be_disabled()
         self.assertEqual(self.errors, [])
 
-    def test_loop_multiple_save_branches_require_explicit_target(self):
+    def test_loop_multiple_save_branches_are_included_together(self):
         self.import_loop_workflow(
             extra_nodes={
                 "other_save": {
@@ -1079,14 +1142,13 @@ class StudioBrowserTests(unittest.TestCase):
             }
         )
         self.page.locator('.node[data-node-id="folder"] [data-loop-mode="each"]').click()
-        expect(self.page.locator("#loop-summary")).to_contain_text("多个保存分支")
-        expect(self.page.locator("#loop-run")).to_be_disabled()
+        expect(self.page.locator("#loop-run")).to_be_enabled()
         self.page.locator("#loop-target").select_option("save")
         expect(self.page.locator("#loop-run")).to_be_enabled()
-        expect(self.page.locator('.node[data-node-id="other_save"]')).to_have_class(re.compile("loop-outside"))
+        expect(self.page.locator('.node[data-node-id="other_save"]')).to_have_class(re.compile("loop-member"))
         self.page.locator("#loop-target").select_option("other_save")
         expect(self.page.locator("#loop-message")).to_contain_text("other-output")
-        expect(self.page.locator('.node[data-node-id="save"]')).to_have_class(re.compile("loop-outside"))
+        expect(self.page.locator('.node[data-node-id="save"]')).to_have_class(re.compile("loop-member"))
         self.assertEqual(self.errors, [])
 
     def test_loop_blocks_back_edge_and_provides_ready_connected_example(self):

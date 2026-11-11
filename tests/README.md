@@ -23,6 +23,10 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 
 ## 只运行一类测试
 
+文件夹全部末端分支：将项目和 tests 放入 `PYTHONPATH`，使用已选解释器执行 `-m unittest test_folder_terminal_branches -q`。覆盖无条件评分、多保存、当前图试跑、条件达标缓存、耗尽不保存、全部目录校验/输出排除、无可视化仍执行、旧 flat 配置、计算失败及多保存冲突清理、条件上游禁止写盘。测试 mock demo 的 10 秒等待，不加载模型。真实浏览器用例 `test_folder_all_terminal_branches_run_and_show_score_without_condition` 检查评分显示与双保存输出。
+
+该模块还覆盖显式结果 / 禁用分支、只评分不保存、普通 / 旧 flat 循环选择中间结果保留达标值且不重跑、无关未完成循环隔离、元数据校验往返、后端节点角色与每文件状态。前端 `test_conditional_loop.js` 覆盖计划过期 / 乱序响应、结果控件运行锁和删节点清理；真实浏览器 `test_batch_result_selection_disable_and_authoritative_plan_without_save` 通过实际按钮禁用错误分支、选择评分、确认不写盘。
+
 修改 `-p` 参数即可，例如 `-p 'test_flux_random_recolor_node.py'`。浏览器测试使用 Playwright Chromium，并在未指定 `STUDIO_TEST_URL` 时自行启动临时服务。
 
 模型节点测试使用替代模型输出验证接口，不自动下载模型或执行真实换色质量评估。

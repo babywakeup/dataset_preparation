@@ -12,10 +12,24 @@ from time import monotonic
 
 from object_inpainting.graph import GraphExecution, GraphExecutionCancelled, is_link
 
+from .batch_scope import finish_batch_outputs
+
 
 OPERATORS = {"<=": operator.le, ">=": operator.ge, "<": operator.lt,
              ">": operator.gt, "==": operator.eq, "!=": operator.ne}
 SCALARS = {"FLOAT", "INT", "BOOL", "BOOLEAN"}
+
+
+def reject_early_writers(graph, body, writers):
+    pending, visited = list(body), set()
+    while pending:
+        node = pending.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        if node in writers:
+            raise ValueError("条件验收的上游不能包含写盘节点；请将结果写盘放在验收之后。")
+        pending.extend(value["node"] for value in graph.nodes[node]["inputs"].values() if is_link(value))
 
 
 def loop_settings(definition):
@@ -71,8 +85,9 @@ class ConditionalPlan:
         self.graph = graph
         self.target_id = target_id
         self.settings = deepcopy(settings)
+        batch_writers = getattr(graph, "batch_write_nodes", {target_id})
         condition_nodes(settings)
-        if graph.nodes[target_id]["class_type"] != "SaveImagesNode":
+        if graph.nodes[target_id]["class_type"] != "SaveImagesNode" and not hasattr(graph, "batch_terminals"):
             raise ValueError("条件循环必须以 SaveImagesNode 为保存终点。")
         for key in ("start_nodes", "seed_nodes"):
             values = settings.get(key, [])
@@ -81,7 +96,7 @@ class ConditionalPlan:
             if len(set(values)) != len(values):
                 raise ValueError(f"{key} 不能包含重复节点。")
         starts = settings.get("start_nodes", [])
-        if not starts or any(node not in graph.nodes or node == target_id for node in starts):
+        if not starts or any(node not in graph.nodes or (node == target_id and not hasattr(graph, "batch_terminals")) for node in starts):
             raise ValueError("请选择有效的循环开始节点，且不能是保存终点。")
         self.mode = settings.get("mode", "all")
         if self.mode not in {"all", "any"}:
@@ -98,25 +113,27 @@ class ConditionalPlan:
 
         body = set(starts)
         for node in graph.order:
-            if node != target_id and any(is_link(value) and value["node"] in body
+            if node not in batch_writers and any(is_link(value) and value["node"] in body
                                          for value in graph.nodes[node]["inputs"].values()):
                 body.add(node)
         self.body = body
-        self.fixed = set(graph.nodes) - body - {target_id}
+        reject_early_writers(graph, body, batch_writers)
+        self.fixed = set(graph.nodes) - body - batch_writers
         if any(graph.nodes[node]["class_type"] == "FolderImagesNode" for node in body):
             raise ValueError("文件夹输入必须位于条件循环外，每张图片有独立的尝试。")
         for node, spec in graph.nodes.items():
-            if node != target_id and getattr(graph.registry[spec["class_type"]], "SIDE_EFFECTS", False):
+            if node not in batch_writers and getattr(graph.registry[spec["class_type"]], "SIDE_EFFECTS", False):
                 raise ValueError("条件循环范围只允许终点保存，不能有其他写盘节点。")
         # Reject bypasses even on branches not selected for this run.
-        for node, spec in definition["nodes"].items():
-            if node in body or node == target_id:
+        escape_nodes = graph.nodes if hasattr(graph, "batch_terminals") else definition["nodes"]
+        for node, spec in escape_nodes.items():
+            if node in body or node in batch_writers:
                 continue
             if any(is_link(value) and value["node"] in body for value in spec.get("inputs", {}).values()):
                 raise ValueError(f"循环输出不能绕过保存终点逃逸到节点 {node}。")
         if any(is_link(value) and value["node"] in body for value in definition.get("outputs", {}).values()):
             raise ValueError("循环体输出不能直接暴露为工作流输出，请通过保存终点。")
-        if not any(is_link(value) and value["node"] in body for value in graph.nodes[target_id]["inputs"].values()):
+        if target_id not in body and not any(is_link(value) and value["node"] in body for value in graph.nodes[target_id]["inputs"].values()):
             raise ValueError("保存终点必须连接条件循环中的输出。")
 
         self.conditions = deepcopy(settings["conditions"])
@@ -245,13 +262,14 @@ class MultiConditionalPlan:
             if not isinstance(preview_loop_id, str) or preview_loop_id not in by_id:
                 raise ValueError("未知循环 ID。")
         self.graph, self.target_id = graph, target_id
-        if not computation_only and graph.nodes[target_id]["class_type"] != "SaveImagesNode":
+        batch_writers = getattr(graph, "batch_write_nodes", {target_id})
+        if not computation_only and graph.nodes[target_id]["class_type"] != "SaveImagesNode" and not hasattr(graph, "batch_terminals"):
             raise ValueError("条件循环必须以 SaveImagesNode 为保存终点。")
         # Only the selected execution slice may run side effects. The full
         # definition is still used below to protect workflow outputs.
         for node, spec in graph.nodes.items():
             cls = graph.registry.get(spec["class_type"])
-            if node != target_id and getattr(cls, "SIDE_EFFECTS", False):
+            if node not in batch_writers and getattr(cls, "SIDE_EFFECTS", False):
                 raise ValueError("执行图只允许一个所选保存终点，不能有其他写盘节点。")
         parents = {n: {v["node"] for v in spec["inputs"].values() if is_link(v)}
                    for n, spec in graph.nodes.items()}
@@ -260,7 +278,8 @@ class MultiConditionalPlan:
             for source in sources:
                 children[source].add(node)
         self.ancestors = {n: _closure([n], parents) for n in graph.nodes}
-        save_ancestors = self.ancestors[target_id] if not computation_only else set(graph.nodes)
+        targets = getattr(graph, "batch_terminals", [target_id])
+        save_ancestors = set().union(*(self.ancestors[node] for node in targets)) if not computation_only else set(graph.nodes)
         self.loops = []
         self.body = set()
         for item in items:
@@ -270,7 +289,7 @@ class MultiConditionalPlan:
                 if (not isinstance(values, list) or any(not isinstance(n, str) or not n for n in values)
                         or len(set(values)) != len(values)):
                     raise ValueError(f"{key} 必须是无重复的节点 ID 列表。")
-                if any(n not in graph.nodes or n == target_id for n in values):
+                if any(n not in graph.nodes or (n == target_id and not hasattr(graph, "batch_terminals")) for n in values):
                     raise ValueError(f"{key} 必须指定有效的普通计算节点。")
             starts, ends = item.get("start_nodes", []), item["end_nodes"]
             if not starts:
@@ -293,6 +312,7 @@ class MultiConditionalPlan:
                 raise ValueError("文件夹输入必须位于条件循环外。")
             if any(getattr(graph.registry[graph.nodes[n]["class_type"]], "SIDE_EFFECTS", False) for n in body):
                 raise ValueError("循环体不能包含副作用节点。")
+            reject_early_writers(graph, body, batch_writers)
             # Ordinary consumers may use any accepted intermediate. Execution
             # retains the whole accepted body; end_nodes are acceptance roots,
             # not a whitelist of legal outgoing edges.
@@ -347,7 +367,7 @@ class MultiConditionalPlan:
             raise ValueError("循环存在交叉未来依赖，不能按完整区域顺序执行。") from error
         by_id = {item["id"]: item for item in self.loops}
         self.loops = [by_id[key] for key in order]
-        self.fixed = set(graph.nodes) - self.body - {target_id}
+        self.fixed = set(graph.nodes) - self.body - batch_writers
         self.max_iterations = sum(item["max_iterations"] for item in self.loops)
 
     def describe(self):
@@ -392,7 +412,7 @@ class ConditionalExecution(GraphExecution):
         result = super()._execute(node_id)
         # A completed save must be reported even if cancellation arrives while
         # writing. All earlier computations are checked again before saving.
-        if node_id != self.target_id:
+        if not getattr(self.graph.registry[self.graph.nodes[node_id]["class_type"]], "SIDE_EFFECTS", False):
             self.checkpoint()
         # A downstream node may modify a PIL image in place. Never hand out
         # the retained fixed-cache object, including during the first attempt.
@@ -401,7 +421,7 @@ class ConditionalExecution(GraphExecution):
     def _execute_checked(self, node_id):
         # Resolve dependencies first: an elapsed deadline must never enter a
         # side-effecting save after a long dependency finishes.
-        if node_id == self.target_id and node_id not in self.cache:
+        if getattr(self.graph.registry[self.graph.nodes[node_id]["class_type"]], "SIDE_EFFECTS", False) and node_id not in self.cache:
             for binding in self.graph.nodes[node_id]["inputs"].values():
                 self._resolve(binding)
             self.checkpoint()
@@ -454,10 +474,11 @@ def run_conditional(plan, context, cancel, progress=lambda _update: None, initia
             progress({"iteration_history": deepcopy(history),
                       "loop_preview": _loop_preview("flat", iteration, accepted, execution, plan.body)})
             if accepted:
-                paths = execution.get_node(plan.target_id)["paths"]
+                outputs = (finish_batch_outputs(execution, plan.target_id) if hasattr(plan.graph, "batch_terminals")
+                           else {"paths": execution.get_node(plan.target_id)["paths"]})
                 progress({"stop_reason": "accepted"})
                 return {"accepted": True, "iterations": iteration, "history": history,
-                        "stop_reason": "accepted", "paths": paths}
+                        "stop_reason": "accepted", **outputs}
             fixed_cache = {node: deepcopy(result) for node, result in execution.cache.items() if node in plan.fixed}
         except LoopDeadline:
             progress({"loop_preview": _loop_preview("flat", iteration, False, execution, plan.body)})
@@ -566,7 +587,7 @@ def _run_multiple(plan, context, cancel, progress, initial_cache):
                     accepted_body.update(item["body"])
                 # Do not freeze bridge nodes depending on failed/unaccepted bodies.
                 retained = {n: deepcopy(v) for n, v in execution.cache.items()
-                            if n != plan.target_id and (n in accepted_body or n in plan.fixed)
+                            if n not in getattr(plan.graph, "batch_write_nodes", {plan.target_id}) and (n in accepted_body or n in plan.fixed)
                             and not (plan.ancestors[n] & plan.body) - accepted_body}
                 if accepted:
                     results.append({"id": item["id"], "name": item["name"], "accepted": True,
@@ -592,10 +613,11 @@ def _run_multiple(plan, context, cancel, progress, initial_cache):
         if plan.preview_node_id is not None:
             execution.get_node(plan.preview_node_id)
             return report(True, "accepted", item, iteration)
-        paths = execution.get_node(plan.target_id)["paths"]
+        outputs = (finish_batch_outputs(execution, plan.target_id) if hasattr(plan.graph, "batch_terminals")
+                   else {"paths": execution.get_node(plan.target_id)["paths"]})
     except LoopDeadline:
         return report(False, "timeout", item, iteration)
     result = report(True, "accepted", item, iteration)
-    result["paths"] = paths
+    result.update(outputs)
     return result
 
