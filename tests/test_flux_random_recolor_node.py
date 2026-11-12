@@ -1,6 +1,7 @@
 import base64
 import inspect
 import io
+import random
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,53 @@ from object_inpainting.nodes.flux_random_recolor import FluxRandomRecolorNode, c
 from object_inpainting.nodes.gray_mask import GrayMaskNode
 from object_inpainting_studio.server import app
 from PIL import Image
+
+
+class RecolorPaletteTests(unittest.TestCase):
+    def test_palette_has_48_unique_named_rgb_colors(self) -> None:
+        palette = flux_random_recolor.RECOLOR_PALETTE
+        self.assertEqual(len(palette), 48)
+        self.assertEqual(len({name for name, _ in palette}), 48)
+        self.assertEqual(len({rgb for _, rgb in palette}), 48)
+        for name, rgb in palette:
+            with self.subTest(name=name):
+                self.assertTrue(name.strip())
+                self.assertTrue(name.isascii())
+                self.assertEqual(len(rgb), 3)
+                self.assertTrue(all(type(channel) is int and 0 <= channel <= 255 for channel in rgb))
+        self.assertTrue({"black", "white", "beige", "khaki", "brick red", "mint green", "denim blue", "lavender"}
+                        <= {name for name, _ in palette})
+
+    def test_expanded_colors_are_reachable_and_keep_rng_local(self) -> None:
+        before = random.getstate()
+        mask = Image.new("L", (2, 2), 255)
+        selected = set()
+        for original in ((0, 0, 0), (255, 255, 255)):
+            image = Image.new("RGB", mask.size, original)
+            for seed in range(512):
+                color = choose_recolor(image, mask, seed)
+                self.assertEqual(color, choose_recolor(image, mask, seed))
+                self.assertGreaterEqual(np.linalg.norm(np.asarray(color[1]) - original), 80)
+                selected.add(color)
+        self.assertEqual(selected, set(flux_random_recolor.RECOLOR_PALETTE))
+        self.assertEqual(random.getstate(), before)
+
+    def test_filter_uses_only_masked_pixels_for_every_palette_color(self) -> None:
+        mask = Image.new("L", (3, 3))
+        mask.putpixel((1, 1), 255)
+        for _, rgb in flux_random_recolor.RECOLOR_PALETTE:
+            image = Image.new("RGB", mask.size, (255, 0, 255))
+            image.putpixel((1, 1), rgb)
+            for seed in range(8):
+                with self.subTest(original=rgb, seed=seed):
+                    _, chosen = choose_recolor(image, mask, seed)
+                    self.assertGreaterEqual(np.linalg.norm(np.asarray(chosen) - rgb), 80)
+
+    def test_no_distant_candidate_still_uses_farthest_fallback(self) -> None:
+        palette = (("near gray", (120, 120, 120)), ("farther gray", (150, 150, 150)))
+        with patch.object(flux_random_recolor, "RECOLOR_PALETTE", palette):
+            self.assertEqual(choose_recolor(Image.new("RGB", (2, 2), (128, 128, 128)),
+                                            Image.new("L", (2, 2), 255), 0), palette[1])
 
 
 class FluxRandomRecolorTests(unittest.TestCase):
@@ -50,6 +98,9 @@ class FluxRandomRecolorTests(unittest.TestCase):
         np.testing.assert_array_equal(gray_reference.crop((0, 0, 35, 21)), self.mask)
         np.testing.assert_array_equal(outputs["mask"], self.edit_mask)
         np.testing.assert_array_equal(call["image"][2], outputs["sampled_color"])
+        expected_rgb = dict(flux_random_recolor.RECOLOR_PALETTE)[outputs["color_name"]]
+        self.assertEqual(outputs["sampled_color"].size, (128, 128))
+        self.assertEqual(outputs["sampled_color"].getextrema(), tuple((v, v) for v in expected_rgb))
         self.assertIn(outputs["color_name"], call["prompt"])
         self.assertIn("fabric weave, texture, folds", call["prompt"])
         self.assertIn("editable clothing region covered in uniform gray", call["prompt"])

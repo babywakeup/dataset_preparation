@@ -12,27 +12,66 @@ from .flux_klein_reference import FluxKleinReferenceNode
 
 
 RECOLOR_PALETTE = (
-    ("burgundy", (128, 32, 64)),
+    # 黑白灰（哑光布料色值，不表示金属材质）
+    ("black", (16, 16, 16)),
+    ("charcoal gray", (72, 80, 88)),
+    ("dark gray", (88, 88, 88)),
+    ("medium gray", (128, 128, 128)),
+    ("light gray", (192, 192, 192)),
+    ("silver gray", (168, 172, 176)),
+    ("off-white", (240, 236, 224)),
+    ("white", (255, 255, 255)),
+    # 米棕色
+    ("cream", (224, 216, 184)),
+    ("beige", (216, 200, 168)),
+    ("oatmeal", (200, 188, 168)),
+    ("sand", (192, 172, 136)),
+    ("khaki", (168, 152, 112)),
+    ("camel brown", (176, 128, 80)),
+    ("caramel brown", (160, 96, 48)),
+    ("chocolate brown", (112, 72, 48)),
+    # 红粉色
     ("scarlet red", (200, 40, 48)),
+    ("burgundy", (128, 32, 64)),
+    ("brick red", (160, 64, 56)),
+    ("coral red", (232, 112, 96)),
+    ("dusty rose", (176, 112, 128)),
+    ("dusty pink", (192, 128, 152)),
+    ("light pink", (240, 192, 200)),
+    ("rose red", (200, 48, 112)),
+    # 橙黄色
+    ("rust", (160, 72, 40)),
+    ("terracotta", (184, 104, 80)),
     ("burnt orange", (192, 88, 40)),
+    ("apricot", (232, 184, 144)),
     ("mustard yellow", (192, 152, 40)),
+    ("ginger yellow", (176, 128, 40)),
+    ("pale yellow", (240, 224, 152)),
+    ("champagne beige", (232, 216, 184)),
+    # 绿色
+    ("army green", (88, 104, 64)),
     ("olive green", (112, 128, 56)),
     ("forest green", (40, 112, 72)),
-    ("teal", (32, 136, 136)),
-    ("sky blue", (96, 168, 208)),
-    ("royal blue", (48, 80, 184)),
+    ("dark green", (24, 72, 56)),
+    ("sage green", (152, 168, 136)),
+    ("mint green", (168, 216, 184)),
+    # 蓝色
     ("navy blue", (40, 56, 104)),
-    ("violet", (120, 64, 160)),
-    ("dusty pink", (192, 128, 152)),
-    ("camel brown", (176, 128, 80)),
-    ("chocolate brown", (112, 72, 48)),
-    ("cream", (224, 216, 184)),
-    ("charcoal gray", (72, 80, 88)),
+    ("royal blue", (48, 80, 184)),
+    ("denim blue", (64, 104, 144)),
+    ("steel blue", (88, 120, 144)),
+    ("sky blue", (96, 168, 208)),
+    ("light blue", (176, 208, 232)),
+    # 紫色
+    ("deep purple", (88, 48, 112)),
+    ("plum purple", (112, 56, 88)),
+    ("muted purple", (144, 128, 152)),
+    ("lavender", (192, 168, 216)),
 )
 
 
 def choose_recolor(image: Image.Image, mask: Image.Image, seed: int) -> tuple[str, tuple[int, int, int]]:
-    """从预设色表随机选择一个与编辑区中位 RGB 有明显差异的候选色。
+    """从 48 种常用服装颜色中随机选择一个与编辑区中位 RGB 有明显差异的候选色。
 
     Args:
         image (PIL.Image.Image): 原尺寸 RGB 图片。

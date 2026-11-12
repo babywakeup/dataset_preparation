@@ -1,6 +1,6 @@
 # 项目协作入口
 
-本目录包含对象参考图 inpainting 数据集流水线，以及 FastAPI + 原生 JavaScript 的 Studio 节点编辑器；不是模型训练入口。
+本目录包含对象参考图 inpainting 数据集流水线，以及 FastAPI + 原生 JavaScript 的 Studio 节点编辑器；另有独立的 FLUX.3 换色 LoRA 训练/推理入口，不经过 Studio。
 
 ## 恢复上下文（节省 token）
 - 首先读取 [迭代交接](docs/ITERATION_NOTES.md) 的“当前交接”；只在需要时读取 [架构地图](docs/PROJECT_CONTEXT.md) 对应章节和相关源码。
@@ -10,6 +10,7 @@
 ## 关键入口
 - CLI：[启动文件](build_object_inpainting_dataset.py) → [cli.main](object_inpainting/cli.py) → [pipeline.build_dataset](object_inpainting/pipeline.py)。
 - Studio：[启动脚本](run_object_inpainting_studio.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
+- FLUX.3 换色：[训练/数据检查](train_flux3_recolor_lora.py)、[推理](infer_flux3_recolor_lora.py)、[使用说明](FLUX3_RECOLOR.zh-CN.md)。
 - 测试命令和依赖说明以 [测试指南](tests/README.md) 为准；模型替代输出测试不能证明真实模型质量。
 
 ## 迭代结束时维护

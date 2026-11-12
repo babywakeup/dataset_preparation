@@ -2,7 +2,7 @@
 set -euo pipefail
 export CUDA_VISIBLE_DEVICES=1
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="${OBJECT_INPAINTING_STUDIO_PYTHON:-$SCRIPT_DIR/../code_judge/.venv/Scripts/python.exe}"
+PYTHON="${OBJECT_INPAINTING_STUDIO_PYTHON:-$SCRIPT_DIR/../.venv/bin/python}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Python executable is not executable: $PYTHON" >&2

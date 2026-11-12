@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "workflow": {
+    "nodes": {
+      "folder": {
+        "class_type": "FolderImagesNode",
+        "inputs": {
+          "dir": "",
+          "recursive": 0,
+          "index": 0
+        }
+      },
+      "loadtarget": {
+        "class_type": "LoadTargetNode",
+        "inputs": {
+          "path": {
+            "node": "folder",
+            "output": "path"
+          }
+        }
+      },
+      "sam3textmask": {
+        "class_type": "SAM3TextMaskNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "text": "upper-body garment",
+          "threshold": 0.5,
+          "mask_threshold": 0.5
+        }
+      },
+      "masktorgba": {
+        "class_type": "MaskToRGBANode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          }
+        }
+      },
+      "rgbatowhitebackground": {
+        "class_type": "RGBAToWhiteBackgroundNode",
+        "inputs": {
+          "rgba": {
+            "node": "masktorgba",
+            "output": "rgba"
+          }
+        }
+      },
+      "fluxkleinreference": {
+        "class_type": "FluxKleinReferenceNode",
+        "inputs": {
+          "prompt": "Create a clean e-commerce flat-lay product photograph of exactly ONE upper-body garment.\n\nReference image 2 is the primary reference for selecting the target garment. Reproduce only the single upper-body garment shown there, such as a shirt, T-shirt, sweater, hoodie, or jacket. Preserve its actual garment type; do not convert it into another type. Do not reproduce the person's complete outfit. Reference image 1 is secondary and may be used only to clarify visible details of that same garment.\n\nAny skin, hands, arms, hair, trousers, skirts, bags, accessories, or background fragments visible around the garment are extraction artifacts or unrelated objects. Exclude them from the result. Do not reinterpret them as fabric, sleeves, panels, straps, or extensions of the garment. If another clothing layer is visible, do not merge it into the target garment.\n\nLay the garment naturally on a plain white surface, photographed directly from above, with the front facing upward. Show the complete garment, including its neckline, sleeves when present, and bottom hem. Center it with even white margins. Arrange its parts naturally without overlap that hides important details. Keep its silhouette and construction plausible for its original garment type.\n\nPreserve the original color, fabric texture, pattern, proportions, neckline, seams, closures, pockets, and existing logos or text. Do not redesign it, add extra sleeves, extra fabric, new garment parts, or another layer of clothing. Reconstruct only small hidden areas needed to complete the same garment, following its existing structure.\n\nUse soft, even studio lighting with subtle natural contact shadows. Show only the single garment. No person, body parts, mannequin, hanger, accessories, other garments, props, standing or floating presentation, added text, borders, or watermarks.",
+          "reference_1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "reference_2": {
+            "node": "rgbatowhitebackground",
+            "output": "rgb"
+          },
+          "reference_3": null,
+          "width": 1024,
+          "height": 1024,
+          "num_inference_steps": 8,
+          "guidance_scale": 4,
+          "seed": 0
+        }
+      },
+      "graymask": {
+        "class_type": "GrayMaskNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "edit_mask": {
+            "node": "maskdilation",
+            "output": "mask"
+          }
+        }
+      },
+      "save": {
+        "class_type": "SaveImagesNode",
+        "inputs": {
+          "img1": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "img2": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "img3": {
+            "node": "maskdilation",
+            "output": "mask"
+          },
+          "img4": {
+            "node": "fluxkleinreference",
+            "output": "image"
+          },
+          "dir": "./test",
+          "img6": {
+            "node": "colorregionswatches",
+            "output": "img1"
+          },
+          "filename": "",
+          "img5": {
+            "node": "colorregionswatches_2",
+            "output": "img1"
+          }
+        },
+        "save_items": [
+          {
+            "id": "img1",
+            "name": "原图"
+          },
+          {
+            "id": "img2",
+            "name": "经过涂灰的原图"
+          },
+          {
+            "id": "img3",
+            "name": "膨胀后的mask"
+          },
+          {
+            "id": "img4",
+            "name": "原图身上的图_生成_平铺图"
+          },
+          {
+            "id": "img5",
+            "name": ""
+          },
+          {
+            "id": "img6",
+            "name": "images_0"
+          }
+        ],
+        "save_next_id": 7
+      },
+      "autocolorregions": {
+        "class_type": "AutoColorRegionsNode",
+        "inputs": {
+          "image": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "detail": 1
+        }
+      },
+      "colorregionswatches": {
+        "class_type": "ColorRegionSwatchesNode",
+        "inputs": {
+          "regions": {
+            "node": "autocolorregions",
+            "output": "regions"
+          },
+          "indices": [0]
+        }
+      },
+      "maskdilation": {
+        "class_type": "MaskDilationNode",
+        "inputs": {
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "dilation_steps": 3,
+          "dilation_kernel": 25
+        }
+      },
+      "fluxrandomrecolor_2": {
+        "class_type": "FluxRandomRecolorNode",
+        "inputs": {
+          "target": {
+            "node": "loadtarget",
+            "output": "target"
+          },
+          "mask": {
+            "node": "graymask",
+            "output": "source"
+          },
+          "seed": -1,
+          "num_inference_steps": 8,
+          "guidance_scale": 4
+        }
+      },
+      "autocolorregions_2": {
+        "class_type": "AutoColorRegionsNode",
+        "inputs": {
+          "image": {
+            "node": "fluxrandomrecolor_2",
+            "output": "source"
+          },
+          "mask": {
+            "node": "sam3textmask",
+            "output": "object_mask"
+          },
+          "detail": 1
+        }
+      },
+      "colorregionswatches_2": {
+        "class_type": "ColorRegionSwatchesNode",
+        "inputs": {
+          "regions": {
+            "node": "autocolorregions_2",
+            "output": "regions"
+          },
+          "indices": [0, 1]
+        }
+      },
+      "colorsimilarity": {
+        "class_type": "ColorSimilarityNode",
+        "inputs": {
+          "image1": {
+            "node": "colorregionswatches_2",
+            "output": "img1"
+          },
+          "image2": {
+            "node": "fluxrandomrecolor_2",
+            "output": "sampled_color"
+          }
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "layout": {
+    "folder": {
+      "x": 50,
+      "y": 60
+    },
+    "loadtarget": {
+      "x": 410,
+      "y": 60
+    },
+    "sam3textmask": {
+      "x": 41.33331298828125,
+      "y": 896.0000610351562
+    },
+    "masktorgba": {
+      "x": 1634,
+      "y": 64
+    },
+    "rgbatowhitebackground": {
+      "x": 2254,
+      "y": 56
+    },
+    "fluxkleinreference": {
+      "x": 3275,
+      "y": 250
+    },
+    "graymask": {
+      "x": 1722.5,
+      "y": 640.5
+    },
+    "save": {
+      "x": 4709,
+      "y": 792
+    },
+    "autocolorregions": {
+      "x": 1165.0001220703125,
+      "y": 1421.8333435058594
+    },
+    "colorregionswatches": {
+      "x": 1589.33349609375,
+      "y": 1504.3334045410156
+    },
+    "maskdilation": {
+      "x": 515,
+      "y": 917.5
+    },
+    "fluxrandomrecolor_2": {
+      "x": 2834.5,
+      "y": 1710.5
+    },
+    "autocolorregions_2": {
+      "x": 3133.5,
+      "y": 1701
+    },
+    "colorregionswatches_2": {
+      "x": 3434,
+      "y": 1696.5
+    },
+    "colorsimilarity": {
+      "x": 3842,
+      "y": 1890
+    }
+  },
+  "config": {
+    "resolution": 1024,
+    "reference_resolution": 512,
+    "dilation_radius": 4,
+    "reference_padding": 0.1,
+    "min_object_fraction": 0.01,
+    "max_object_fraction": 0.6,
+    "validation_fraction": 0.1,
+    "seed": 42
+  },
+  "loop": {
+    "sourceId": "folder",
+    "targetId": "save",
+    "enabled": true,
+    "conditionalTargetId": null
+  }
+}

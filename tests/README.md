@@ -1,5 +1,21 @@
 # 数据准备测试
 
+## 独立 FLUX.3 换色 LoRA
+
+在项目根目录运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" CUDA_VISIBLE_DEVICES='' ../.venv/bin/python -m unittest test_flux3_recolor_data test_flux3_recolor_training test_flux3_recolor_inference test_flux3_reference_trainer test_flux3_reference_training -v`。
+
+五份测试覆盖文件名配对/解码/EXIF/同步预处理/来源分组/检查CLI；真实小型FLUX.3+VAE的三参考前反向、基础冻结、LoRA alpha保存与重载；参考式入口的别名冲突、自动/显式分桶、多batch/小桶保留、缓存身份、caption/dropout、LR/warmup/epoch、workers、TensorBoard、Prodigy、checkpoint限额，以及完整本地随机FLUX.3/VAE/Qwen/tokenizer训练/验证/恢复/推理。恢复与连续训练的adapter/RNG精确对照；非constant horizon变化及旧状态被拒绝。FSDP相关CPU测试检查包装前FP32 master及完整参数裁剪接口，不代表真实FSDP运行。
+
+本地模型布局回归另运行 `PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_local_model -v`：覆盖HF缓存refs/main解析、官方processor位于text_encoder、metadata安全路径及索引缺分片拒绝。不下载或加载基础权重。
+
+两进程CPU DDP单独运行：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" CUDA_VISIBLE_DEVICES='' RUN_FLUX3_DDP_TESTS=1 ../.venv/bin/python -m unittest test_flux3_reference_distributed -v`。使用torchrun启动真实Accelerate/DDP，检查两rank参数同步、样本分片、验证后继续训练、epoch中途checkpoint与尾累积恢复；连续与恢复的最终adapter逐位对照。默认不自动运行此长测试。DataLoader worker和Gloo需要本机socket/IPC；受限沙箱中可能拒绝，须在允许这些能力的环境运行，不能将权限失败记为代码通过。
+
+需要支持FLUX.3的本地Diffusers、torch、PEFT、Accelerate；TensorBoard测试需要tensorboard，Prodigy依赖缺失时单独跳过。具体环境及功能对应表见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不下载权重，不证明真实FLUX.3的GPU显存或换色质量。
+
+实时图像回归 `test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_tensorboard_validation_images_update_during_training_at_real_steps` 在训练验证返回后、训练结束关闭writer前读取实际event文件，检查同一生成图/五列对照tag在step1和2递增，图像尺寸有效，证明训练过程中即可查看。不是只在end_training之后检查落盘文件。
+
+单卡CUDA回归单独运行：`CUDA_VISIBLE_DEVICES=1 RUN_FLUX3_CUDA_TESTS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_cuda_validation -v`。仅在显式启用时暴露一张授权GPU，用随机小型BF16模型训练两步、每步验证并读取TensorBoard；检查无显式索引的cuda设备、CUDA RNG隔离、验证后继续训练和检查点。未加载真实用户权重。CPU回归 `test_checkpoint_is_committed_before_validation_failure_and_can_resume` 模拟验证失败，核对完整checkpoint已在验证前提交且可恢复。
+
 本目录集中存放数据准备、节点、API 和浏览器测试。业务模块、启动脚本、工作流和示例图片仍保留在上一级目录。
 
 ## 从 Diffusers 仓库根目录运行

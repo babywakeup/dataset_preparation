@@ -1,11 +1,12 @@
 # 对象参考图 Inpainting 数据准备与 Studio
 
-本目录用于构建对象参考图 inpainting 数据集，并提供 FastAPI + 原生 JavaScript 的 Studio 节点编辑器，支持工作流编辑、预览、保存与文件夹批处理。这里不是模型训练入口。
+本目录用于构建对象参考图 inpainting 数据集，并提供 FastAPI + 原生 JavaScript 的 Studio 节点编辑器，支持工作流编辑、预览、保存与文件夹批处理。另外提供独立的 FLUX.3 换色 LoRA 训练/推理脚本，不经过 Studio。
 
 ## 项目入口
 
 - **CLI 数据集生成**：[启动文件](build_object_inpainting_dataset.py) → [cli.main](object_inpainting/cli.py) → [pipeline.build_dataset](object_inpainting/pipeline.py)。启动文件只是薄入口，实际逻辑在业务模块中。
 - **Studio**：[启动脚本](run_object_inpainting_studio.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
+- **FLUX.3 换色 LoRA**：[训练/数据检查](train_flux3_recolor_lora.py)、[三图推理](infer_flux3_recolor_lora.py)、[中文说明](FLUX3_RECOLOR.zh-CN.md)。模型需手动下载；真实权重训练尚未验证。
 - **使用与依赖**：[Studio 说明](object_inpainting_studio/README.md)、[中文使用指南](object_inpainting_studio/USAGE.zh-CN.md)。
 - **测试**：[测试指南](tests/README.md) 提供运行命令、导入路径和浏览器测试要求。模型替代输出测试不能证明真实模型质量。
 

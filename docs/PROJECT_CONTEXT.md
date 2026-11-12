@@ -1,6 +1,19 @@
 # 项目架构地图
 
-更新日期：2026-11-10。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
+更新日期：2026-11-11。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
+
+## 独立 FLUX.3 换色训练
+
+- [训练/数据检查入口](../train_flux3_recolor_lora.py) 和 [推理入口](../infer_flux3_recolor_lora.py) 独立于下述数据构建/Studio 路径，详见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不改本地 Diffusers 示例，不自动下载模型。
+- `flux3_recolor/data.py` 负责严格配对/完整像素指纹/来源分组拆分、默认等比面积与16px网格策略，以及与推理共享的参考比例梯级/显式桶几何。根训练脚本的 `DreamBoothDataset/collate_fn/BucketBatchSampler` 支持多batch/repeats/workers、按epoch与sample身份确定的同步场景增强；色块独立，无颜色增强。采样键包含全部三参考尺寸，DDP按完整batch补齐进程步数，尾小桶保留。
+- 根 `train_flux3_recolor_lora.py` 是唯一训练实现，贴近参考DreamBooth结构；旧 `flux3_recolor/training.py` 仅转发。原生Accelerate prepare/accumulate、AdamW/Prodigy、LR/warmup、PEFT自定义目标、时间采样/weighting、tracker、offload/cache均有实际入口。缓存按样本身份存目标及三条件，禁止随机几何组合；固定prompt预编码，自定义caption在线编码并匹配dropout窗口。
+- `modeling.py` 保留三参考L=-1/-2/-3、VAE BN/patchify、flow matching、标准adapter及alpha metadata。普通DDP状态仅含LoRA/optimizer/LR/scaler/每rank RNG与epoch/batch位置；FSDP1使用原生完整/分片状态（含基础模型），另导出LoRA。新状态version=2拒绝旧手动累积checkpoint，恢复要求相同world_size/关键配置，非constant调度不能改变horizon。只清理有本入口标识且步数匹配的完成checkpoint。
+- `inference.py` 使用本地 FLUX.3 ModularPipeline，移除 prompt upsampler 与内部文本编码块，传入按训练设置预编码的正/负文本；复用三图预处理，输出生成图及对照。基础权重限定非蒸馏 `flow_map=False`，要求完整 Diffusers 格式。
+- `config.py` 支持普通模型目录、具体snapshot和带refs/main的HF缓存根目录；按 `modular_model_index.json` 解析tokenizer/processor子目录，无元数据时兼容独立tokenizer或text_encoder内tokenizer_config。官方base的processor实际在text_encoder；不能硬要求tokenizer目录。权重索引会校验分片存在性，缓存/权重始终只读。
+- processor直接从解析后的组件路径加载，避免Transformers5.5.4用BFL根config做Mistral tokenizer启发判断；不要给标准Qwen regex盲加Mistral修补。已核对base snapshot的Qwen使用共享输入embedding/lm_head权重，权重文件不单列lm_head不是缺片。
+- 训练默认TensorBoard、每100个优化步4张固定留出验证；`log_validation`使用真实global_step和稳定validation/generated、validation/comparison样本标签，最终为test阶段，验证后flush事件以便训练中浏览。PNG按step目录保留，所有rank同步后继续训练；report_to=none只写盘，num_validation_images=0关闭验证。
+- 单卡Accelerate可能返回无index的torch.device('cuda')；CUDA RNG隔离和量化device_map用cuda_device_index回退到torch.cuda.current_device，不能把None传给fork_rng。同一步checkpoint先于验证提交，避免首次验证失败时丢失该保存步的训练状态。
+- FSDP1要求use_orig_params=true与统一FP32 Transformer/LoRA master，裁剪向Accelerate传完整参数列表以计算全局norm；可选text encoder FSDP。FSDP只支持普通AdamW，无量化/FP8/8bit/Prodigy组合；bitsandbytes量化只支持单GPU。上述GPU路径与真实显存/质量均未验收，不从CPU小模型结果推断成功。
 
 ## 1. 两条使用路径
 
