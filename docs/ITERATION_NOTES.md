@@ -4,6 +4,210 @@
 
 ## 当前交接
 
+- 2026-11-17 / 用户授权删除precision_recipe/版本分支/custom norm，并要求VAE回到预训练原始状态：删除CLI/resume shim/apply_recipe/NativeLayerNorm/NativeGroupNorm及VAE标记。训练和独立加载都直接from_pretrained(torch_dtype=float32)加载VAE，内部模块/forward/参数不改；encode_latents仅调用处关闭autocast，pipeline验证无外层AMP，原生decode转换latent到vae.dtype。保留latent BN与FP32 loss，噪声/velocity跟随latent；删重复target.float条件。
+- precision.py精简为set_transformer_autocast与pipeline_forward（临时旁路Accelerate输出FP32转换，保留Transformer自身AMP并还原），训练/验证/推理统一计算边界，不触碰模型原生FP32保留模块。LoRA/text encoder主参数策略未改。比较工具移除recipe选项和元数据，验证工具/测试重命名verify_flux3_precision.py、test_flux3_precision.py；文档明确历史旧norm GPU数值不代表当前方案验收。旧recipe状态需新目录训练，无兼容分支。
+- 验证：专项先RED后GREEN；18模块CPU106项（104通过、2显式opt-in跳过），含原始VAE state逐元素/模块类型/forward身份、外层AMP编码隔离、BF16 CPU pipeline VAE编码和解码FP32、原生LayerNorm和非零FP32 LoRA梯度、训练恢复/验证/推理；两rank CPU DDP普通caption/独立text encoder同步保存恢复2项通过。独立只读review无重要项，语法/--help/git diff --check通过。未运行真实GPU精度/质量或性能验收，未干预已有GPU任务；修改前源码已临时备份。任务完成；下一步未指定。
+
+
+- 2026-11-17 / 用户要求参考Transformers logging_steps并用tqdm显示进度：新增--logging_steps正整数默认10、resume可调整；training_logging.TrainingLogger管理主进程tqdm（按成功optimizer step，恢复initial=checkpoint.global_step）及GPU区间loss分子/Python样本数。只在日志点和最后一步reduce两个统计量、读取标量、写tracker/history/进度postfix；loss按各rank实际样本数加权。训练不再每优化步归约loss日志；finite检查逐microbatch保留，FP16跳步丢弃本组统计、不推进进度。finally关闭进度条，checkpoint/验证频率独立；日志窗口不持久化，恢复首段只计本次继续训练样本。
+- 验证：新日志unit和集成先RED后GREEN；5模块CPU41项（39通过、2显式opt-in跳过），含不等样本权重、非日志点无归约、尾段、logging1/2最终LoRA逐位一致、区间均值、恢复调整频率和进度起点；两rank CPU DDP普通caption/独立text_encoder保存同步恢复2项通过。首次集成测试mock全局tqdm影响HF权重加载，已改为仅mock本模块tqdm并完整重跑通过；独立review无重要问题，--help/git diff --check通过。文档/架构/原优化计划已更新，未用GPU或测实际吞吐；任务完成，下一步未指定。
+
+
+- 2026-11-17 / 用户误删除后git恢复到较旧暂存版，授权补齐所有缺失修改：先备份现场，按保留测试/交接/会话恢复dataset_cache、path Dataset/buckets、data/modeling helper、validation、独立text_encoder与新入口、component_io和统一inference；重新移除旧task代码/入口/测试/文档、check_dataset、latent缓存、独立LR和方向loss。保留现有Git暂存状态，不操作其他已暂存修改。
+- 复查补齐三项：缓存命中比对manifest并load_from_disk验证；缓存v2严格恢复format_version/config/subdatasets/files-list及原排序/SHA256序列化；read_path_sample默认center_crop=True（训练显式传参）。真实磁盘旧2384bd…缓存的key和manifest完全匹配并成功命中，禁止Image.open时真实数据3196train/356val、1024x768单桶、batch2=1598批，与原结果一致。推理CLI别名/split_json、manifest来源字段及诊断direction参数也已恢复。
+- 最终验证：17模块CPU104项（102通过、2显式opt-in跳过），含原缓存schema/命中可读性/默认中心crop的3项新回归；两rank CPU DDP在线caption与独立text_encoder同步/恢复2项通过，缓存规范修复后独立encoder额外复验1项通过。首轮诊断接口遗漏已修；独立review及修复复查无剩余重要项，语法/新入口--help/git diff --check通过。未用GPU/真实模型。恢复源码快照另存flux3-restored-source-1794887254831469431.tar.gz（临时目录）；尚未提交Git。恢复任务完成，下一步未指定。
+
+
+- 2026-11-17 / 用户要求自定义模型与训练参数统一text_encoder命名，并精简验证结构：模块/类改flux3_recolor.text_encoder.TextEncoderConfig/Model，开关--train_text_encoder，入口train_flux3_recolor_text_encoder.py，测试test_flux3_text_encoder.py，文档FLUX3_TEXT_ENCODER.zh-CN.md；components/result/函数参数/config字段统一text_encoder，manifest type=learned、model_type=recolor_text_encoder，无旧别名。optimizer使用完整encoder.parameters且共享learning_rate。
+- 验证：build_pipeline附真实自定义recolor_text_encoder引用，训练make_validation_pipeline传unwrap后的共享模块；validation.pipeline_text_embeddings调用当前forward并no_grad+detach正向、保持冻结负向与dtype/device，渲染函数删除模型类型分支；tracker图片记录提取log_validation_images，固定prompt验证复用已有编码。统一推理loader也保留标准from_pretrained模型供pipeline使用，默认generate_sample读取相同helper。pipeline缓存/precision/RNG/offload/去重/临时目录保护保留。
+- 验证结果：更名和live encoder新测试RED→GREEN，8模块CPU56项（54通过、2显式opt-in跳过），两rank CPU DDP自定义encoder/在线caption同步恢复2项通过，rank间和连续vs恢复参数逐位一致。首轮测试发现no_grad expand视图仍requires_grad，已显式detach；旧SimpleNamespace字段访问改为依据components处理，完整回归重跑通过。独立review无重要问题，新入口--help/git diff --check通过；未用GPU或真实大模型。任务完成，下一步未指定。
+
+
+- 2026-11-17 / 用户要求text encoder config添加length控制token数：TaskEmbeddingConfig以正整数length替代sequence_length，参数形状[1,length,hidden_size]及forward输出遵循该值，from_features默认取prompt实际窗口；save_pretrained/from_pretrained持久化恢复length，无新增CLI。新增非默认length=7、保存重载和非法值测试RED→GREEN；相关7项CPU回归通过，覆盖独立梯度/标准格式/训练恢复/验证推理/组件保存，git diff --check通过。文档/架构已更新；未用GPU，任务完成，下一步未指定。
+
+
+- 2026-11-17 / 用户批准分组件保存与自动基础权重发现：新增component_io.save_components供checkpoint hook/最终export共用，transformer/仅标准Diffusers LoRA及adapter metadata（参考img2img脚本），可训练TaskEmbeddingModel完整save_pretrained至text_encoder/，冻结vae/Qwen不导出；根model_config.json记录base_model及组件来源。task helper统一text_encoder子目录；weights_layout=components_v1拒绝旧目录恢复。hook保存异常通过main_process_action广播；FSDP内部恢复仍为原生Accelerate状态，组件导出只有增量。
+- 加载：新增inference.load_recolor_pipeline，读取manifest基础模型/可覆盖路径并核对签名，加载transformer/LoRA及text_encoder标准模型，CFG负向仍由基础Qwen编码；返回原生pipeline附recolor_config/recolor_embeddings，generate_sample可默认读取文本条件。独立推理CLI共用加载入口；非空输出保护保留。文档/架构/测试路径同步，无旧目录兼容。
+- 验证：新component_io专项RED→GREEN，6模块CPU回归44项（42通过、2显式opt-in跳过），包含manifest实际发现基础模型、无冻结组件目录、标准from_pretrained、训练恢复与独立推理；两rank CPU DDP普通caption/独立task双模型同步恢复2项通过，rank间及连续vs恢复权重逐位一致。首轮一处测试遗留旧task_encoder目录，已修并完整重跑；独立review无重要问题，git diff --check通过。未用GPU/真实模型；任务完成，下一步未指定。
+
+
+- 2026-11-17 / 用户要求删除task_embedding_learning_rate：删除CLI、合法性/Prodigy独立LR限制及resume默认字段，optimizer两个参数组统一使用learning_rate和scale_lr，task encoder保留weight_decay=0。测试命令/实验说明/架构同步，移除flag由原拒绝参数用例覆盖。20项CPU回归通过（标准格式/梯度/训练/恢复/验证/推理/入口），另直接检查scale_lr开关两组LR一致且encoder无weight decay；git diff --check通过，未用GPU。任务完成；下一步未指定。
+
+
+- 2026-11-17 / 用户明确不要旧兼容、会重新训练：删除task_embedding.py的旧单tensor文件读取分支与FILENAME常量，仅支持task_encoder/config.json+model.safetensors。实验说明/架构已纠正，不再声称支持旧文件推理。现有5项CPU测试通过（标准格式往返/跨Transformer梯度/训练更新/恢复/验证/推理），git diff --check通过；未用GPU。本次仅清理task encoder兼容，不扩大到无关历史恢复规则。任务完成；下一步未指定。
+
+
+- 2026-11-17 / 用户确认两个独立模型方案并授权实施：task_embedding.py改为Transformers TaskEmbeddingConfig/TaskEmbeddingModel，FP32[1,L,H]从prompt初始化，forward返回BaseModelOutput；删除Transformer子模块与forward monkeypatch。主训练将Transformer/task encoder分别prepare、共同accumulate/clip，encoder输出保留梯度传入Transformer；optimizer分组独立LR保持。固定prompt/在线caption默认路径保持。Qwen只负责初始化和固定负向后释放；验证读取独立encoder当前正向。
+- 保存/恢复：task_encoder/config.json+model.safetensors通过save_pretrained/from_pretrained，checkpoint hooks分别保存LoRA和独立encoder并原位加载，保留optimizer引用；main返回task_encoder供验收。task_encoder_format标记拒绝旧内嵌训练checkpoint，新实验用新目录；旧task_embedding.safetensors仍可独立推理。FSDP+task继续明确拒绝，无新增参数。
+- 验证：3项新结构专项RED→GREEN（跨Transformer梯度/参数独立/未改forward/标准格式/identity/shape），4模块CPU回归36项（34通过、2显式opt-in跳过）；另两rank独立双模型CPU DDP同步/累积/验证/恢复1项通过，encoder和LoRA均跨rank及连续vs恢复逐位一致。独立只读review无重要问题，git diff --check通过。文档/实验说明/架构更新；当前版本未用GPU或真实大模型，不代表质量/速度改善。任务完成；下一步未指定。
+
+
+- 2026-11-17 / 用户要求恢复在线text encode，并提议task embedding替换整个text encoder：已撤回text_cache.py及对应测试，删除caption_encoding新标记；自定义caption保留encoder/tokenizer并按当前batch在线编码，dropout空文本动态窗口恢复；维度检查使用accelerator.unwrap_model(transformer).config。fixed/variants/task暂保持原实现。文档已改回在线语义；上一迭代预编码说明由本条取代。
+- 当前验证：4模块40项CPU（38通过、2显式opt-in跳过），独立review无重要问题，git diff --check通过；两rank CPU DDP+caption/dropout同步与恢复1项通过，参数一致。task替换尚未实施：已异步询问用户是用可训练[1,L,H]模块替代Qwen接口，还是训练整个Qwen；等待必要语义确认，未作依赖修改。未用GPU；任务未完成，下一步确认并实施task encoder设计。
+
+
+- 2026-11-17 / 用户要求模仿train_dreambooth_lora_flux3_klein.py文本处理：新增text_cache.cache_caption_embeddings，prepare前按实际训练record的fallback prompt去重，分批编码至CPU；batch>1以全集最大长度向上取80倍数/限制max_sequence_length，batch1保留独立窗口；dropout空文本按窗口提前编码。训练只查询并搬运缓存，所有路径释放text_encoder/tokenizer，维度校验使用包装前整数。固定prompt/变体/task embedding保留，无新增参数。caption_encoding标记阻止旧在线caption checkpoint混用（统一窗口改变语义）；新caption训练需新目录，固定prompt配置不变。CPU缓存内存随唯一caption数增长，各rank一份。
+- 验证：2项缓存专项RED→GREEN（共享窗口/去重/CPU/no-grad/batch1）；5模块CPU回归42项（40通过、2显式opt-in跳过）；另两rank CPU DDP+自定义caption+dropout同步/恢复/验证1项通过，rank间和连续vs恢复最终参数逐位一致。独立只读review无重要问题，git diff --check通过。未用GPU/真实模型，未验证真实吞吐和质量；本任务完成，下一步未指定。
+
+
+- 2026-11-16 / 用户批准精简模块化验证去重与恢复处理：新增validation.py，ValidationRuns仅本进程记录成功渲染的step/config/选中sample_id/seed/推理步数；log_validation统一选样和去重后执行原渲染/FSDP收集/广播。相同step/epoch/final只保留首次触发目录与tracker，不同final prompt仍出图。恢复进程不复用去重状态；同级临时目录完整生成后替换该步旧目录，生成失败保留旧图，发布不是原子替换。独立推理仍拒绝非空目录，无新增CLI参数。
+- 验证：4项专项先RED后GREEN（去重/配置变化/新进程/失败重试/目录替换/输入保护）；相关5模块32项（30通过、2显式opt-in跳过），两rank CPU DDP同步/恢复/验证1项通过。真实随机小模型覆盖恢复时旧step目录、相同final省略、不同final保留及task embedding/离线推理；一处测试新增final prompt后恢复漏传同配置，已修fixture并完整重跑通过。独立只读review无重要问题，git diff --check通过。未用GPU或真实模型；任务完成，下一步未指定。
+
+
+- 2026-11-16 / 用户批准P0-2 VAE批量编码：新增modeling.encode_recolor_latents，将目标/涂灰/源图沿batch维拼接后调用原encode_latents并按B拆回，色块单独编码；训练main每microbatch由4次VAE调用降为2次。FP32 VAE、posterior mode、BN/patchify、条件顺序、offload和flow matching不变，无新增参数或latent缓存。合并后场景瞬时batch为3B，真实GPU速度/峰值显存未测量。
+- 验证：专项4项先RED（缺helper）后GREEN，覆盖B=1/2/3调用次数与顺序、非平凡BN、AMP/RNG保持、相同噪声/时间步loss及非零LoRA梯度等价；15模块CPU回归93项（91通过、2显式opt-in跳过）。独立只读review未发现重要问题；另两rank CPU DDP同步/恢复/验证验收1项通过（连续vs恢复及rank间参数逐位一致）。文档/架构/原方案已更新，git diff --check通过。未使用GPU或真实权重；本任务完成，下一步未指定。
+
+
+
+- 2026-11-16 / 用户改为删除latent缓存以简化代码：删除cache_latents CLI、预计算函数/cached_latents_for_batch、CPU latent字典及训练读取分支；每个microbatch统一在线encode目标与三参考，VAE精度/flow matching不变。删除缓存专用的随机几何互斥及验证后offload条件，offload开关本身保留；Dataset hash缓存和文本embedding预编码保留。旧saved config的cache_latents字段只在恢复校验中pop，不启用旧功能。
+- 缓存专用测试删除，训练/DDP/任务embedding用例改为在线模式，FP32 VAE/AMP/官方pipeline等价测试保留；新增参数缺失与旧配置字段忽略契约RED→GREEN。30项相关CPU单测通过；最终14模块90项（88通过、2显式opt-in跳过），另两rank在线编码DDP参数同步/恢复1项通过。独立只读review确认无残留执行引用、device/dtype/offload与恢复逻辑无重要问题。文档与原方案已标记latent去重取消；未用GPU或真实模型。任务完成；下一项未指定。
+
+
+- 2026-11-16 / 用户批准P0-1第一阶段实际消费缓存：main删除扫描/配对/拆分，直接加载hash缓存train/validation；DreamBoothDataset继承torch Dataset，初始化纯元数据计算buckets/bucket_idx，Sampler按预建bucket_indices组batch并保留DDP尾batch补齐。__getitem__才按record路径load_rgb/EXIF转正，目标/灰图/源图共享几何，异分辨率引用先对齐目标画布，色块独立resize。删除样本direction、方向mask/归约/分方向loss。repeat、随机prompt及空caption回退保留。
+- 验证/推理统一消费validation记录，num_validation_images为总图片数，按固定等距位置覆盖整个合并序列；数字目录+来源manifest，无方向扩展。独立验证推理读取config.dataset_path，支持dataset_root重定位；新config记录dataset_format/condition_order/dataset_root，split为sample_id列表。旧adapter仍可显式三图推理，新旧训练checkpoint不直接混用。Cache格式v2按各子集有效文件取stat，不再取跨子集交集；groups映射须覆盖实际参与记录。
+- 实际验证：新增接入测试先RED后GREEN；最终14模块CPU共91项（89通过、2项显式opt-in跳过），另真实两rank CPU DDP同步/恢复1项通过；含缓存连续vs恢复adapter/RNG/LR一致、task embedding更新/验证、独立推理、数学/精度对照。首次worker测试被沙箱IPC拒绝，停止该次后沙箱外完整重跑；独立推理旧配置校验曾拒绝新schema，已修并回归；review发现验证前N条偏首子集，已改等距选择并加测试，复查无剩余重要项。实际test的3196 train/356 validation在禁止Image.open时完成Dataset/Sampler初始化，1024x768单桶、batch2为1598批；读样本场景3x1024x768、色块3x128x128且无direction。
+- 范围：第一阶段完成；latent按文件去重和VAE批量编码未做，encode次数/precision recipe/flow matching数学未改。未用GPU或真实模型训练。文档/计划进度已更新，训练/推理--help及git diff --check通过，独立复查确认修复后无剩余重要项；下一项待用户指定。
+
+
+- 2026-11-16 / 用户要求独立Dataset hash缓存，随后要求回到Claude/DeepSeek优化MD：新增dataset_cache.py，SHA256包含有效构建配置/目录映射/选中文件名/源文件size+mtime_ns及构建版本，排除模型/LR/rank/分辨率/worker/output_dir；路径为输入目录上一级datasets/recolor_cache/hash。每key文件锁、临时构建、cache_config.json写完后原子发布；跨run和resume命中加载，不重复读图片头构建。train helper单独组装config，report记录缓存路径；消费Dataset/bucket尚未切换。
+- 13项CPU测试通过（key/文件修改/跨run/并发/失败重试/原构建），独立review无重要项；随机小模型连续vs恢复adapter/RNG/LR精确回归1项通过，git diff --check通过；hash缓存任务完成。已重新读取2026-11-16-training-optimization.md：P0-1部分完成，元数据消费/latent文件去重未做；P0-2/P0-3未做；P0-4的闭包wrapper.config仍静态存在。P1-7/P2-1后续须按用户“合并后不分方向”意图调整为移除方向统计。未实施MD的其他项；当前任务转回MD核对，建议先收尾P0-1再处理DDP caption/VAE批量。
+
+
+- 2026-11-16 / 用户要求删除不必要的数据检查参数：删除train_flux3_recolor_lora.py的check_dataset CLI、其专用main分支及配置排除项；pretrained_model_name_or_path改argparse required，输出路径/恢复checkpoint初始化不再被外层if包裹。正常训练的自动构建调用仍在，Dataset/bucket消费切换仍未实施。相关unit fixture改为显式模型占位路径，旧数据检查CLI用例改为验证必填模型和拒绝已移除开关；文档更新。验证44项相关CPU回归及1项task embedding参数拒绝测试通过（共45项）；--help无已删除参数、模型路径显示必填，git diff --check通过。未用GPU或真实模型。任务完成，下一项未指定。
+
+
+- 2026-11-16 / 用户要求训练内直接import调用Dataset构建：新增train入口prepare_path_dataset，在output保护/恢复配置检查后、load_training_components前，通过main_process_action仅主进程import build_dataset生成output_dir/dataset；已有保存目录load_from_disk验证可读后复用。check_dataset指定output时也构建。无新CLI参数；沿用当前directions、seed、validation_fraction、workers及prompt/caption_json/groups_json。builder新增可选prompt/captions/source_groups，确保产物元数据与训练选项一致。
+- 范围：仅接自动构建调用，已向用户明确当前Dataset/sampler/loss/验证消费逻辑未重写，生成artifact仍待下一步使用。验证8项构建/复用CPU测试通过；另2项随机小模型缓存连续vs恢复adapter/RNG/LR精确一致及TensorBoard实时验证通过。第一次测试fixture漏check_dataset导致参数退出，已修并重跑；不是实现错误。未使用GPU/真实模型。独立review指出单方向额外样本不应扩大groups_json覆盖要求；已传入当前训练索引的sample_names先过滤后分组，新增复现测试RED→GREEN，复查无剩余项。--help/git diff --check通过，文档已更新。任务完成；下一步未指定。
+
+
+- 2026-11-16 / 用户批准完成path-only Dataset并说明后续：build_flux3_recolor_dataset.py不再生成uint8像素缓存；schema为sample_id/source_id/target_path/condition_paths/height/width/condition_sizes/prompt。Value(string)绝对路径不嵌入图片bytes；目标/三条件各读自己的EXIF显示尺寸，PNG通过seek跳过压缩chunk并支持晚eXIf，不解码像素。保留在concat阶段控制比例，再按source_id分组拆分；无direction列。新默认datasets/recolor_paths，旧24G的datasets/recolor_uint8未删除。
+- 已验证：5项CPU测试通过（禁止像素decode的构建/路径列/独立WH、晚PNG EXIF、比例/来源隔离、坏头过滤、NFS缓存清理）；独立只读review无重要问题。实际CPU4构建命令退出0，3196 train/356 validation、源组1598/178无交叉，3552唯一ID；8880独立路径全部存在，抽样24张图与实际EXIF转正尺寸一致，最终4,439,947 bytes（约4.4MB）。无Image特性、无图片binary。训练入口未改、无GPU/模型调用。原图需保持原路径；仅检查头部，不证明像素payload无损坏。
+- 后续未实施：训练load_from_disk；按元数据建立参考式buckets/bucket_idx与BucketBatchSampler；Dataset取样读路径并同步几何/色块resize/归一化，统一loss不再分方向；latent cache/实时验证接入统一记录并回归检查。最终5项CPU测试再次通过，--help/git diff --check通过。当前数据集构建任务已完成；下一步等待用户指定。
+
+
+- 2026-11-16 / 用户批准先构建HF Dataset，训练入口不动：新增build_flux3_recolor_dataset.py，两个方向各自读取目标/灰图/源图/色块RGB uint8及独立尺寸，按mix_ratio在concatenate阶段重复补足比例，合并后按完整文件名主干source_id分组拆分。最终schema无direction，含sample_id/source_id/target/conditions/prompt/height/width。原始连续HWC uint8以binary缓冲区持久化，unpack_image用np.frombuffer无图片解码；每图尺寸在其struct内，色块不resize。临时子集cache构建后清理，最终save_to_disk，输出目录拒绝覆盖。
+- 验证：4项CPU测试通过（raw字节/uint8/独立尺寸/禁止解码读取、2:1拼接/源组隔离、缺失坏图分别过滤/拒绝覆盖、共享文件系统缓存清理），独立review确认无重要问题。曾用Array2D嵌套像素导致实测约1条/秒，已停止自己的构建、改raw binary，测试RED→GREEN；实际4进程达到约50条/秒。沙箱内IPC被拒，沙箱外CPU4完成各1776条生成，最终3196 train/356 validation已落盘，约24G。首次实际构建的save_to_disk全部完成后，临时cache清理因NFS持有mmap报错；已定位并在退出缓存scope前del所有Dataset引用/gc.collect，NFS测试RED→GREEN，4项最终通过。最终数据独立加载验证3552个唯一sample_id、源组1598/178且交集0、24张抽样图片与原始RGB逐像素一致；补齐build_summary并清理残留，无需重建。保存datasets/recolor_uint8并由.gitignore排除，未用GPU/模型、未改训练实现。--help/git diff --check通过。构建任务完成；训练接入待下一项任务。
+
+
+- 2026-11-16 / 用户要求撤掉上一版过度设计，改普通Dataset：已删除fast/full/retry新增CLI、indexing.py独立替换器、指纹/旧checkpoint迁移、尺寸报告传递及验证替换功能。启动只取完整文件名交集；Dataset只读目标图片头为现有batch sampler算shape，取样才RGB解码。异常仅SampleDataError，打印失败文件，固定额外8次，同Dataset/方向/尺寸/repeat候选并返回实际prompt/缓存ID；正常样本无候选搜索。inspect_dataset仍供独立诊断使用，不进入训练/check_dataset链路；check_dataset现在只看配对/拆分。旧checkpoint不迁移，训练使用新输出目录。
+- 验证：新增4项CPU测试通过；首轮相关8模块65项完成（63通过、2跳过），涵盖随机小模型训练/缓存/恢复/实时验证/推理。独立review发现小尺寸几何应纳入跳过、repeats重复浪费重试次数，已修并补测试；最终相关8模块66项完成（64通过、2跳过）；新增4项再次通过，--help确认新增参数已移除，git diff --check通过。复查确认修复无剩余项。未使用GPU/真实模型；无新增参数。任务完成，下一项未指定。
+
+- 2026-11-16 / 用户要求复查 train_flux3_recolor_lora.py 可优化点：只读审查+独立复查，未改代码/未用GPU。已核实：启动重复解码（当前test 1776组双向、开cache时主进程约4.9万次；本机抽样约19ms/张，不含resize/VAE）、训练每microstep 4次VAE encode可合并、验证仅主进程且末step与final重复、FSDP验证每次重载完整transformer；缺color_swatch_size的旧version-2 checkpoint无法resume（真实validate_training_resume复现；现outputs v1/v3/v4/v5均带128字段，影响更老checkpoint，文档已说明新128不能resume旧32）；Namespace入口line911直接访问args.precision_recipe且task_embedding+caption_json会传None；默认batch1/accum1时loss_b_to_a/loss_a_to_b每步只出现一个方向；prompt_augmentation被显式prompt/caption忽略但仍持久化true。补充：checkpoint save hook内main-only的save_adapter/save_task_embedding未走main_process_action，主进程单侧写失败时其他rank会在wait_for_everyone挂起至超时（新增task文件写入加重该风险）。补充2：FSDP验证代理以bf16加载而训练transformer保持FP32，破坏precision训练/验证一致性；set_peft_model_state_dict返回值未检查，键不匹配会静默保留gaussian初始化LoRA；epoch边界checkpoint恢复可能跳过该epoch验证。补充3：`--task_embedding_learning_rate` 未启用train_task_embedding时静默无效但仍持久化，恢复不带该flag会配置不一致。补充4：DDP/FSDP+caption_json在线文本编码在accelerator.prepare后访问wrapper.config会崩；恢复重放未checkpoint步骤时已存在的validation-step-*会被prepare_output拒绝覆盖；caption_json覆盖检查错误地要求validation names。问题与实施顺序已整理到[训练入口优化方案](superpowers/plans/2026-11-16-training-optimization.md)。
+- 验证：py_compile相关模块通过；真实validate_training_resume对缺swatch字段复现“恢复配置不一致: color_swatch_size”，缺precision/task字段在legacy当前配置下PASS；独立复查基线21项+3集成+7 task embedding测试通过、legacy resume未覆盖；未跑真实训练/GPU。下一步：用户决定是否实施重复解码/VAE批量/验证去重/旧checkpoint迁移；未指定。
+
+- 2026-11-15 / 用户要求确认可学习embedding实际更新：只读核对当前实现的Parameter注册、训练forward直接使用未detach特征、优化器独立group、backward/step及用户实际outputs/flux3_task_embedding。配置train_task_embedding=true、LoRA LR1e-5、task LR0.001、BF16、accum1。比较完成checkpoint100→200，embedding为FP32[1,240,20480]，4,915,163/4,915,200元素变化（99.99925%），平均绝对差0.00553134、最大0.04365665；转换BF16后仍77.6198%元素不同。checkpoint200的optimizer最后group仅该参数，LR0.001/weight_decay0，step200，exp_avg norm0.00049822且shape匹配，确认实际梯度和更新，不只是代码推断。
+- 诊断JSON输出outputs/flux3_task_embedding/task_embedding_update_check.json；未改训练代码或停止/干预运行，未用GPU。该证据不等于色块换色质量改善。git diff --check通过；下一项用户任务未指定。
+
+
+- 2026-11-15 / 用户要求新增可学习text embedding训练py用于比较（已完成）：新增train_flux3_recolor_task_embedding.py，自动启用train_task_embedding，复用原训练循环；原train_flux3_recolor_lora.py默认固定文本不变。新增flux3_recolor/task_embedding.py，共享FP32[1,L,H]由固定prompt编码初始化，在模型train forward内部扩展到batch，保证DDP reducer追踪；原Transformer/LLM/VAE冻结，联合更新LoRA及feature，可独立task_embedding_learning_rate（默认同LoRA、embedding无weight decay）。任务特征注册在追加子模块，避免顶层FP32 Parameter改变Diffusers model.dtype（RED复现后修复）。不实现色块编码器或Qwen训练。
+- 验证/保存：eval不强制替换输入；实时验证只把正条件换成当前detach feature，空文本负条件保留。checkpoint和最终导出增加task_embedding.safetensors，恢复原位copy保留optimizer参数引用；flux3_recolor/inference.py自动识别config并读取保存特征，缺文件提前报错。原固定checkpoint缺新配置字段按false/None兼容；新旧模式不能互相恢复。为保持实验含义拒绝captions/augmentation/dropout/验证prompt覆盖；当前单卡/DDP支持、FSDP提前拒绝。Prodigy独立不同LR由review发现不支持，已增加加载模型前的参数拒绝及factory保护，测试通过。
+- 实际验证：初始功能缺模块RED→2项GREEN；dtype回归RED→追加子模块修复；首轮26项CPU测试通过。最终OMP/MKL=1、CUDA_VISIBLE_DEVICES空、RUN_FLUX3_DDP_TESTS=1、PYTHONPATH=.:tests的相关10模块共73项通过（task_embedding及原数据/训练/推理/reference/local_model/math/bidirectional/precision），含真实随机小模型学习更新、正负条件分离、验证与checkpoint特征一致、独立推理加载、连续vs恢复LoRA及feature逐位一致；两rank DDP参数同步/恢复一致。另GPU1 RUN_FLUX3_CUDA_TESTS=1的随机小模型BF16两步训练/实时验证1项通过，原模型BF16、featureFP32且更新。--help及git diff --check通过。未加载真实模型训练或证明换色改善；用户现有训练未触碰。
+- 文档FLUX3_TASK_EMBEDDING.zh-CN.md提供A/B命令与独立推理；使用说明/架构地图/tests指南/实施计划已更新。一次独立review除已修Prodigy问题无其他重要项。任务完成；下一项用户任务未指定。
+
+
+- 2026-11-14 / 用户do it授权新Qwen prompt实际复跑：直接GPU1执行demo_qwen_recolor_pipeline.py，新英文Picture1/2/3 prompt、原三图/seed43/40步/true_cfg4/guidance1/negative空格/组件offload不变，未泄漏目标颜色词/RGB；开始GPU1另有约35GB占用，未触碰其他任务。40步约6分43秒完成，进程退出。新图仍深蓝衣服、构图漂移，目标近白色[243,243,247]，确认该prompt修改未解决当前样本问题，不能声明成功。
+- 产物outputs/qwen_swatch_only_demo_prompt_v2_00019_43/{generated.png,previous_root_result.png,condition_1/2/3.png,run_config.json,README.md,demo_used.py}，根qwen_recolor_result.png为新图；保存旧结果和完整输入/参数。实际模型运行+输出肉眼/ROI核对，git diff --check通过。未再自动调参/训练/改数据；下一项用户任务未指定。
+
+
+- 2026-11-14 / 用户要求改Qwen demo为合适prompt：仅修改demo_qwen_recolor_pipeline.py的正向prompt，改为使用pipeline原生Picture1/2/3标签的英文短指令，优先图3取色→图1衣服底色，图2仅用差异定位；强调原纹理/印花/人物/背景/原始取景与尺寸，不缩放裁切或拼参考图。保持三图、40步、seed43、CFG、offload等不变，不含目标颜色名/RGB/色号。ast语法及无颜色词/Picture编号静态断言、git diff --check通过；本轮未重新执行20分钟模型推理，新prompt效果待验证，不能声明已修复。上一轮失败图片保留，未动训练/数据；下一项任务未指定。
+
+
+- 2026-11-14 / 用户do it授权Qwen真实运行：GPU1当时空闲约80GB，将demo_qwen_recolor_pipeline.py的use_sequential_cpu_offload改False，按组件offload保持其他参数。直接venv执行成功退出，40步完成，根qwen_recolor_result.png已保存；本地原始BF16、无LoRA、三图原图A/涂灰/主颜色B00019_00、色块128，中文prompt不含目标颜色名/RGB/色号，CPU seed43/true_cfg4/guidance1/negative空格/输出768×1024。
+- 实际图像肉眼核对：近白色色块[243,243,247]却输出深蓝衣服，构图明显漂移，当前样本仅色块测试失败，不能宣称Qwen已具备满足任务的效果或所有配置都失败。产物outputs/qwen_swatch_only_demo_00019_43/{generated.png,condition_1/2/3.png,run_config.json,README.md,demo_used.py}；保留root结果。实际日志首次迭代约17分钟，后续4.6秒/步，总去噪20分钟，首次长等待未定位；guidance_scale1被非guidance-distilled模型忽略warning，true_cfg4仍按官方参数生效。进程退出，GPU1显存释放；没有重跑/降低分辨率/改采样或训练。下一项任务未指定。
+
+
+- 2026-11-14 / 用户已下载Qwen-Image-Edit-2511并要求官方式仅色块demo：新增demo_qwen_recolor_pipeline.py，直接QwenImageEditPlusPipeline.from_pretrained本地BF16；图片原图A/涂灰图/主颜色B、00019_00、色块nearest128，中文prompt不含目标颜色名/RGB/色号。沿用官方40步、true_cfg_scale4、guidance_scale1、negative_prompt为空格、1张输出，CPU Generator43，指定原图宽高；保存qwen_recolor_result.png。默认use_sequential_cpu_offload=True，关闭时组件offload；不改FLUXdemo/训练、不加LoRA或mask外合成。
+- 核对官方HF模型卡Quick Start与本地QwenImageEditPlusPipeline.__call__签名，模型目录model_index存在且匹配class。ast语法/无目标颜色词及所有调用参数匹配本地API静态检查通过；当前venv实际import QwenImageEditPlusPipeline通过；git diff --check通过。未加载该大模型或执行真实GPU生成，未证明仅色块换色效果。架构地图补独立入口；下一项任务未指定。
+
+
+- 2026-11-14 / 用户要求两个image_cond modulation写入默认LoRA：flux3_recolor/modeling.py的LORA_TARGETS保留Attention四项+FFN两项，新增early_stream_modulations.image_cond.linear、single_stream_modulations.image_cond.linear；未加入x_embedders等其他层。未显式传--lora_layers的新训练生效，显式列表仍完整覆盖默认。更新使用说明：新增模块使用新输出目录；旧checkpoint继续需原目标代码/恢复配置，不能简单新增模块恢复。
+- 验证：OMP/MKL=1、CUDA_VISIBLE_DEVICES为空、PYTHONPATH=.:tests，unittest test_flux3_recolor_training -q 6项通过，含前反向冻结、adapter保存/重载、推理metadata非默认alpha；另真实随机小Transformer flow loss backward检查两个新增模块LoRA B梯度非零（约5.46e-5和9.03e-4），原base权重仍冻结。CPU沙箱打印CUDA初始化warning但命令退出0，未使用GPU或启动用户训练。git diff --check通过。下一项任务未指定。
+
+
+- 2026-11-14 / 用户授权demo统一工作流prompt/steps/CFG/seed并实际复测：demo_flux3_recolor_pipeline.py现按workflow的seed=-1、8步、guidance_scale4，两模型共用一次actual_seed与节点choose_recolor的颜色名/128 sampled_color，并直接复用recover_recolor_mask及相同pad/crop/composite。prompt逐字复制节点长指令，含color_name（本轮用户明确要求复现旧流程，例外于仅色块实验，不改训练默认）。修正当前demo中的cfg_scale为本地支持的guidance_scale；保留用户原图A/涂灰输入。输出新增run_config记录与mask/条件图、原始与合成图；旧根结果运行前备份。复跑固定seed输出目录已存在时拒绝覆盖。
+- 实际GPU1直接执行demo成功，两模型均8步完成退出：actual_seed3568041805、sky blue、RGB[96,168,208]；FLUX2与FLUX3均生成天蓝衣服，已肉眼核对，合成结果mask外差0。产物outputs/flux_workflow_aligned_demo/3568041805/，含demo_used.py、run_config、raw/composited结果与旧根备份，根flux2/3_recolor_result.png为原始crop输出。AST验证prompt与节点源码相同、8/4/-1与JSON相同；语法/git diff --check通过。复现的是工作流换色流程，不是历史白衣逐像素复现（缺旧actual_seed/色块/环境）；包含颜色名，不能证明仅色块能力。未修改训练/数据，下一项任务未指定。
+
+
+- 2026-11-14 / 用户问demo的FLUX2为何不复现workflow(11)new训练图：只读核对发现用户已改demo为原图A/涂灰/主颜色B，且删除两模型的steps/CFG显式参数，保留其编辑未覆盖。当前workflow随机换色为8步/CFG4/seed=-1，节点长prompt插color_name、随机palette sampled_color128；当前Flux2 demo固定seed43、短无颜色词prompt、未传steps故本地默认50/CFG4。workflow生成后crop/composite，demo直接保存，不能同条件复现。
+- 关键颜色来源差别：workflow的colorregionswatches_2从生成source区域分色估计平均RGB输出32图，不是模型输入sampled_color；当前主颜色B[243,243,247]是结果侧估计，不能唯一恢复原颜色名/seed。当前JSON save.img4连平铺图节点而非randomrecolor.source，未直接保存生成图B，历史保存/改名过程未核实；00019_00 PNG无元数据、test未找到JSON种子记录。只记录当前源码，历史模型env override/节点版本未知，不能保证逐像素复现。详见docs/FLUX2_WORKFLOW_DEMO_COMPARE.zh-CN.md。未改生产代码/demo/数据，未用GPU；下一项用户任务未指定。
+
+
+- 2026-11-14 / 用户要求demo加入FLUX2推理：demo_flux3_recolor_pipeline.py保留原生FLUX3直接调用，后续del/gc/清CUDA缓存再加载本地FLUX.2-klein-base-9B，使用官方Flux2KleinPipeline和model CPU offload（9B避免与Qwen常驻GPU）。两者共用同一原图/涂灰图/色块、同一无颜色词prompt，CPU Generator seed43、28步、CFG3.5；分别输出flux3_recolor_result.png和flux2_recolor_result.png，不做mask外合成或LoRA。仅改demo；未调用真实GPU推理，本轮验证为ast语法/两次共享输入与CFG静态断言、核对本地Flux2 API及模型目录、git diff --check，未证明本次Flux2实际效果。下一项任务未指定。
+
+
+- 2026-11-14 / 用户要求直接demo交换条件顺序并再跑：已将demo_flux3_recolor_pipeline.py改为待改色原图（原来的生成图B）/涂灰图/主颜色A色块，prompt同步image1编辑/image2定位/image3颜色，无目标颜色词；保持00019_00、色块128、CPU Generator seed43、28步及其他加载方式。GPU1原始模型直接执行该文件成功退出，未动训练dataset/checkpoint或用户训练。结果仍白衣，未达到黑色色块要求；详见outputs/flux3_demo_source_first/{generated.png,report.json,README.md,demo_used.py}，根flux3_recolor_result.png亦为新图，旧根图片已备份。
+- 验证：脚本ast解析、真实GPU 28步推理、输出图肉眼与mask中位RGB检查、git diff --check。旧根图参数未独立核实；此前诊断多用CUDA Generator，本demo用CPU Generator，同数字seed并非同噪声，不能把跨工具差异全归于图片顺序。只确认当前新顺序此次仍失败。下一项用户任务未指定。
+
+
+- 2026-11-14 / 用户以FLUX.2随机换色节点产物质疑仅色块能力结论：只读核对object_inpainting/nodes/flux_random_recolor.py，当前版本第172行明确将color_name写入prompt（颜色词+色块双条件）；条件顺序为原图/涂灰图/色块，区别于训练入口涂灰/源图/色块，但各自prompt匹配，不能直接视为顺序bug。第197行Image.composite强制复制mask外原像素，不能把外部背景逐像素不变归因于模型能力。底层默认FLUX.2-klein-base-9B，可由OBJECT_INPAINTING_FLUX_MODEL_DIR覆盖。若训练数据由此版本产生，不能作为FLUX2“仅色块提供目标颜色”的证据；历史版本/当时generation_prompt未核实。未改节点/训练/数据，未启动GPU；下一项用户任务未指定。公平模型对照需相同参考图顺序、无颜色词prompt、采样设置并只换第三张色块。
+
+
+- 2026-11-14 / 用户澄清要官方示例式直接脚本：新增demo_flux3_recolor_pipeline.py，顶层直接ModularPipeline.from_pretrained→load_components→to(cuda)→传三张图和prompt→保存flux3_recolor_result.png，无CLI/训练依赖/LoRA。本地HF cache解析snapshot；仅加载本地四组件并关闭未下载的可选prompt扩写，processor直接指向text_encoder目录；色块128放大，prompt不写目标颜色。保留之前CLI入口，不再作为本次用户所要的简短示例。验证仅ast语法解析/git diff --check，未运行本脚本真实GPU推理；先前组件加载测试不能替代该脚本的完整GPU验收。下一项任务未指定。
+
+
+- 2026-11-14 / 独立pipeline测试文件（用户要求给单独py自行测试）：新增根test_flux3_recolor_pipeline.py，无训练模块依赖/LoRA/precision补丁，官方ModularPipeline.from_pretrained+load_components本地加载，FP32 VAE、其他按mixed_precision；关闭prompt扩写，默认指令不含目标颜色名/RGB/色号，目标颜色仅由色块提供。默认dataset_root=test、00019_00、b_to_a，也可三个显式图片路径；支持prompt/file、seed、steps、CFG、分辨率/色块尺寸。默认完整原生prompt编码，--offload_text_encoder可使用官方编码步骤预计算后卸载Qwen再加载Transformer。支持HF缓存root到snapshot与processor组件目录，输出PNG/三条件/run_config，拒绝非空目录覆盖。
+- 验证：先新增tests/test_flux3_pipeline_standalone.py，缺入口模块RED；实现后OMP/MKL=1、CUDA_VISIBLE_DEVICES空、PYTHONPATH=.:tests的unittest test_flux3_pipeline_standalone -q 1项通过，包含本地随机真实小模型两条路径各实际生成一张图；--help通过，git diff --check通过。本轮未额外加载真实基础权重/GPU或运行用户训练；两路径小模型测试不证明真实模型质量。使用说明FLUX3_RECOLOR.zh-CN.md、tests/README已补命令。下一项用户任务未指定。
+
+
+- 2026-11-14 / 用户约束纠正与仅色块复测：目标颜色只能由第三张色块提供，训练/验证/推理prompt不加入目标颜色名、RGB或色号；solid black/red文字成功不算本任务成功，后续保持该约束。现有dataset默认prompt本就不含目标颜色，未修改生产配置。
+- 已完成原始零LoRA/无精度补丁模型、00019_00/seed43/28步/CFG3.5，仅128色块变化、其余条件与无颜色词的同一短prompt固定：黑色块[27,27,28]得到灰衣median[116,115,112]；白色块[243,243,247]仍灰衣[122,126,124]。图片肉眼核对，两组均不符合目标。此样本/配置下原始模型未正确执行仅色块换色；不能据此证明所有prompt/尺寸均失败，灰图颜色是否占主导未做因果控制。GPU1两次无梯度推理已完成退出，未动用户训练/基础权重。
+- 产物outputs/flux3_swatch_only_check/{README.md,report.json,两组PNG,reproduce.py}；断言两prompt完全相同且不含常见颜色词，git diff --check通过，无生产代码变更/单元测试。已给前次显式颜色报告加不适用本任务的纠正。下一项用户任务未指定。
+
+
+- 2026-11-14 / 原始pipeline能力复验（用户要求确认未训练基础模型）：直接原始Transformer BF16/VAE FP32，零LoRA参数、无生产precision/norm/forward补丁、无外层AMP，ModularPipeline.from_pretrained本地入口；官方文本步骤预计算后移除重复编码块，Qwen与Transformer分阶段加载。00019_00、seed43、28步、CFG3.5三组：原prompt+黑色块输出蓝色median[35,122,207]，与前次禁用LoRA对照逐像素MAE0；明确solid black的另一prompt+同黑色色块输出黑色[19,18,17]；明确red+红色块输出红色[212,42,34]。图片已肉眼核对，人物/背景/logo基本保留，未证明所有细节精确保留或全样本成功。
+- 结论：基础模型具备基本换色能力，但当前原prompt在该样本的色块控制失败；不能只归因学习率。明确颜色prompt也缩短/改写原文，未隔离唯一颜色词因果；红色同时更换文字与色块，非冲突优先级实验。产物outputs/flux3_pristine_pipeline_check/{README.md,report.json,三组PNG,配置与reproduce.py}；三次GPU推理已完成退出。最初保留文本编码块时缺少prompt报错，移除已预计算的重复编码块后重跑完成，非生产训练故障。未改dataset prompt/生产代码/基础权重/用户训练，无代码测试；下一步用户任务未指定。
+
+
+- 2026-11-14 / v3第700步颜色排查（完成只读诊断）：用户指出outputs/flux3_recolor_v3/validation-step-700/b_to_a偏色。四张图条件RGB/顺序/目标色块核对正确，确为fp32_vae_native_norm_v1、LR1e-6、双方向、batch/accum1、warmup100。700步仅见b_to_a357/a_to_b343批，相对3196双向训练记录约0.219轮。LoRA B非零且600/700/800范数增长（0.1905/0.2280/0.2487），排除完全未更新。
+- GPU1无梯度实际checkpoint700、00019_00、seed43、28步六组对照：有无LoRA×黑白色块CFG3.5，另LoRA黑白CFG1。独立pipeline黑色CFG3.5逐像素复现保存蓝衣图（MAE/max0），未发现该样本共享权重/输入额外漂移。LoRA/base全图RGB MAE0.4248/255、涂灰区域0.6488/255；黑/白色块仍蓝，区域median[34,123,208]→[41,130,210]；CFG1回白色源衣，仍不服从黑色，单调CFG未解决。已确认颜色控制未学起来/该样本改变量小；低LR和覆盖不足为强嫌疑，未用LR对照证实唯一根因，不能声称全量数据语义均正确。
+- 产物outputs/flux3_recolor_v3_color_diagnosis/README.md、六组图片/report/响应指标/四验证颜色统计/adapter范数；为避免用户checkpoint自动轮转保留700步adapter与配置，基础权重未复制。复现脚本在该产物目录，分阶段加载Qwen与Transformer、不启动训练。该GPU过程已退出，用户现有训练未触碰；生产脚本/训练参数未改，本轮无代码测试，实际验证为六次真实模型生成与图片/权重统计。下一步建议小样本过拟合与LR1e-5对照，未实施；下一项用户任务未指定。
+
+- 本轮精度修复与共享验证（2026-11-13，已实施）：用户授权开始修改，并要求原生pipeline直接共享训练模型/最新LoRA。新增flux3_recolor/precision.py；新训练默认precision_recipe=fp32_vae_native_norm_v1：原始FP32 VAE、channels_last且编码AMP关闭、FP32 latent缓存/加噪/velocity标签，前向输入显式compute dtype；LayerNorm/GroupNorm局部AMP关闭，RMSNorm保持。Transformer自身固定compute AMP，使FP32 LoRA主权重的分支训练/独立推理一致，不整体cast或清零LoRA A。保留用户attention-only LORA_TARGETS。
+- 验证继续走原生Flux3 modular pipeline；单卡/DDP缓存同一pipeline并引用训练Transformer对象，scheduler独立复制，LoRA更新立即可见。临时绕过Accelerate的forward/autocast/输出FP32包装后生成，finally恢复forward/train mode/RNG；构建pipeline失败也恢复模式。FSDP仍汇集LoRA构建副本，真实多GPU FSDP未验收。包装必须保留forward签名，首轮集成因guider筛掉img_ids失败，现wraps原unbound forward并补签名断言，重跑通过。
+- 配置/兼容：训练写precision_recipe，独立推理读取；旧缺失字段按legacy，跨方案恢复严格拒绝。旧checkpoint继续需--precision_recipe legacy；新方案必须新输出目录。既有训练进程不会热更新，本轮未重启/停止用户训练或改已有权重。
+- 验证：完整CPU相关测试含两进程Gloo/DDP共73项通过（test_flux3_recolor_data/training/inference、reference_trainer/training/distributed、local_model、math_audit、bidirectional、precision_recipe、pipeline_compare、layer_trace；OMP/MKL=1，CUDA_VISIBLE_DEVICES为空、PYTHONPATH=.:tests，RUN_FLUX3_DDP_TESTS=1）。新增原生VAE编码断言后precision_recipe的6项另行通过；RUN_FLUX3_CUDA_TESTS=1、仅GPU1的随机小模型BF16两步训练/实时pipeline画图/继续训练1项通过；git diff --check通过。沙箱CPU首次DataLoader IPC被拒绝，沙箱外重跑；初轮FSDP加载断言仍预期旧BF16 VAE，按新FP32契约更新后通过。
+- 真实GPU1结果：verify_flux3_precision_recipe.py只加载Transformer、限本进程显存20%，六组已保存相同输入/noise/timestep对原生无AMP前向velocity均逐位0；最后一组另测零LoRA、人工非零LoRA、真实Accelerate包装临时绕过均逐位0且恢复成功，非零权重确实改变输出。峰值约11.88GiB，过程结束；报告outputs/flux3_precision_recipe_verified.json。独立FP32 VAE真实00047_00、1024预算、两个方向各目标+三条件共8次，helper/原生encoder与helper内外AMP均逐位0，报告outputs/flux3_precision_vae_verified.json。用户GPU1已有其他训练占约58GiB，未触碰；未加载完整大模型训练，也未做多步图像质量验收，不能声称印花根因已解决。
+- 复核/文档：独立只读review无重要问题；明确非零LoRA/Accelerate检查只覆盖最后一组。更新使用说明、架构地图、对照说明、测试指南与实施计划。任务完成；下一项任务未指定。
+
+- 本轮逐层定位（2026-11-13，承接用户要求必须找到具体子环节）：新增trace_flux3_tensor_path.py与tests/test_flux3_layer_trace.py。GPU1实际基础模型、同一份完整Transformer输入/noise/timestep/condition/text/IDs，记录前80个叶子事件及全部模式/联合block的全张量SHA256；首个分歧事件42为txt_mode_blocks.0.norm的post。该LayerNorm输入最大差0，关AMP输出BF16、开AMP输出FP32，局部相对差0.1609%；后续调制路径dtype改变。临时只对全部44个LayerNorm关闭AMP、其余模型维持AMP时，velocity相对差5.894%→逐位0。扩展到原先两个方向×三个seed6组，原相对差0.845%–5.894%，干预后六组均逐位0。首个层不等于该层单独解释全网误差；验证的是整个归一化类策略。
+- VAE独立定位：同一BF16 VAE、相同像素/布局下，encoder首个AMP分歧为down_blocks.0.resnets.0.norm1（GroupNorm），输入逐位同，输出BF16→FP32；encoder22个归一化模块关闭AMP后latent相对差2.428%→逐位0。固定相同latent及raw decoder input，decoder首个分歧为mid_block.resnets.0.norm1（GroupNorm），decoder30个归一化模块策略对齐后输出相对差0.2266%→逐位0。官方FP32 VAE与当前BF16 VAE的精度差另从像素.to(dtype)开始（max0.00193012），首conv_in输出max0.0198395；共享helper与原生FP32 encoder逐位0，手动逆BN/unpatchify/decode与原生decoder逐位0。decoder在velocity之后，不会造成velocity误差。
+- 根因表述：定位为不同入口的归一化autocast输出dtype及VAE加载精度不一致，未证实归一化公式错误或印花根因。训练VAE编码在AMP外、Transformer在AMP内；训练验证整个pipeline在AMP内；独立推理/用户官方示例无外层AMP，官方VAE另为FP32。此前1.7%–10.8%混合了VAE条件latent变化与Transformer上下文变化，不能全归给同一个LayerNorm。本轮干预只临时包装forward并finally还原，生产训练/推理及既有权重未改。
+- 验证：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_layer_trace -q`3项通过，含实际随机小模型三阶段、norm策略还原及大activation指纹索引。诊断工具首轮FP32 linspace在N>2^24时把N-1舍入到N导致越界，先RED复现后改int64索引；不是模型训练错误。真实三阶段trace及6组LayerNorm控制已完成，报告outputs/flux3_tensor_path_trace/README.md与各阶段JSON；GPU1显存已释放0MiB。独立复核无重要代码问题，要求区分“首个分歧层”和“全类归一化干预”；git diff --check通过。下一项用户任务未指定，精度策略统一修复尚未实施。
+
+- 本轮浮点复核（2026-11-13）：用户要求重新考虑差异是否仅浮点并重算。新增analyze_flux3_numeric_precision.py，在GPU1仅重放上一轮6组已保存输入：条件tokens×AMP四格、BF16/FP32同配置重复、同权重值/输入值的FP32算术参考（TF32关闭）及最终BF16输出舍入基线。真实6组重复/保存结果重放均逐位一致；训练/官方MSE相对差0.117%–0.923%、velocity相对L2差1.743%–10.777%。训练BF16+AMP对FP32差0.775%–5.351%、官方BF16无AMP对各自FP32差0.797%–5.326%，量级相近；最终舍入基线0.166%–0.167%，不是多层传播误差上界。
+- 解释修正：不逐位相同不能据此认定遗漏步骤或必须修改训练。确定性浮点误差也可重复为0；FP32参考改变全精度路径（含时间步乘1000、归一化），不是恢复未知FP32权重/质量真值，也不能断言关AMP更正确。相近loss不能保证最终图像等效，印花根因未由此证实。独立数学复核无重要问题。生产训练/推理/精度参数均未改，未更新原权重/数据；GPU1过程结束显存0MiB，峰值约23.55GiB。
+- 验证：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_pipeline_compare -q` 2项通过，涵盖新分析器的实际CPU重放。最初CPU因sigma逆shift的一舍入位差被过严非条件exact guard拒绝，现核对1e-6接近后固定所有非条件字段做factorial；真实GPU保存输入本已逐位相同，重放误差0，GPU计算不受此修正影响。报告outputs/flux3_numeric_precision/{README.md,numeric_report.json}，说明已补充误差解释边界。下一项任务未指定。
+
+- 本轮无梯度真实pipeline对照（2026-11-13）：用户要求独立py复用训练步骤、无LoRA/grad，与pipeline比同sample；后补官方示例VAE FP32/其他BF16，并手动关闭训练授权GPU1。新增compare_flux3_training_pipeline.py及test_flux3_pipeline_compare.py，复用Dataset/collate/encode_latents/文本helper/flow_matching_loss，fork_rng重放真实noise与时间采样（无mock），对齐noisy latent与sigma；native通过ModularPipeline.from_pretrained本地入口+load_components原始FP32 VAE，关闭prompt扩写/CFG以比同一conditional前向，其余官方块保留。RGB、VAE输入、全部Transformer输入/预测、同标签MSE、一步state.latents、独立精度/布局探针与两种上下文重放均记录。默认不放宽atol1e-5/rtol1e-4，不以hook改布局掩盖差异；支持保存CPU张量，报告完成不等于allclose。
+- 本轮结果：真实基础权重GPU1、00047_00、1024预算、两个方向×seeds42/43/44共6例。RGB/noisy latent/timestep/text/RoPE IDs逐位相同，条件latent不相同；当前训练VAE为BF16，官方FP32 VAE/无全局autocast不同。当前BF16验证路径中，channels_last+autocast编码探针可逐位匹配pipeline；官方FP32 VAE同像素/布局、无autocast编码helper后cast到Transformer dtype也逐位匹配官方条件tokens。即使Transformer输入相同，切换autocast仍有数值差；同输入且保持训练上下文时6例预测最大差均0。独立复算训练loss最大差5.96e-8。A→B seed42训练loss0.56145465，对官方预测复算MSE0.56663805，velocity RMSE0.10592640；不能声称真实路径等价，也不能断言差异是印花唯一根因。先前CPU控制测试不足以证明实际BF16等价，本轮已纠正范围。
+- 本轮验证：新增工具最初RED缺模块，后补一步latent shape回归RED发现state.images是已解码图而非latent，现使用state.latents。最终 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_pipeline_compare test_flux3_math_audit -q`，8项通过。真实GPU仅显式CUDA_VISIBLE_DEVICES=1、HF/Transformers离线；报告与张量位于outputs/flux3_pipeline_compare_verified/{a_to_b,b_to_a}，根README汇总。对照进程已退出，GPU1显存使用0MiB；独立代码复核无重要问题，git diff --check通过。未改生产训练/验证/推理精度配置、原图或既有checkpoint；统一精度/上下文尚未实施。说明见[无梯度对照](FLUX3_PIPELINE_COMPARE.zh-CN.md)，下一项用户任务未指定。
+
+- 本轮计数诊断（2026-11-13，只读）：用户询问1598 samples为何少于自述1905pairs。当前test五目录逐一统计均1776个PNG，无其他文件；最新outputs/flux3_recolor_v2保存report count=1776、training_record_count=1776，配置training_directions=[b_to_a]、repeats1、batch1/G1、validation_fraction0.1，split=train1598/validation178。因此该日志为1776源样本留出178后的单向训练记录，并非双向已展开；相同split双向应3196条训练/356条验证。1905与当前目录及保存报告不符，未推断文件丢失或过滤原因；未改代码/数据/运行，建议新目录明确选择两个方向，旧进程不会热更新。下一项任务未指定。
+
+- 本轮双向换色（2026-11-13）：用户批准将gray/B/colorA→A与gray/A/colorB→B两个子数据集合并。新训练默认training_directions=[b_to_a,a_to_b]，每源各一条、repeats共同作用；源文件名/来源组先拆分后展开。新增CONDITION_FOLDERS2/TARGET_FOLDER2及集中task_folders/subdataset_config；B色块完整配对/纯色检查、像素参与指纹。Dataset/缓存身份含方向，单b_to_a保留旧身份；配置保存方向/子集映射，旧checkpoint仅在显式选择单b_to_a且其他配置/数据不变时兼容。loss可返回逐样本误差，训练按方向真实样本数归并loss_b_to_a/loss_a_to_b，控制台/JSON/TensorBoard共用；不把混合batch均值复制给两方向。
+- 本轮验证/推理：每个留出源样本生成两个方向，PNG及TensorBoard标签含方向；num_validation_images=4表示共8张生成图。单方向保留旧目录；推理--direction选择方向、手动三图新增source_image/color_image中性别名。独立复核发现源文件名generated.png会被递归glob误当图片目录，真实验证先RED复现再加is_file过滤，综合测试固定保留此边界。完整61项CPU回归通过，最终console/help调整后双向6项+实际训练/恢复/出图/反向推理1项共7项再通过；`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests RUN_FLUX3_DDP_TESTS=1 ../.venv/bin/python -m unittest test_flux3_reference_distributed -q` 1项通过，实际双CPU rank双向分片无交集、参数同步、逐步验证继续训练、连续与中途恢复adapter逐位一致。worker/Gloo用获准沙箱外IPC/socket；均为本地随机小模型。
+- 本轮真实数据检查：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 ../.venv/bin/python train_flux3_recolor_lora.py --check_dataset --instance_data_dir ./test`通过；当前已1754组源样本，三场景均768×1024，两色块均32×32，所选B色块均纯色。默认split为train1579/validation175，双向记录3158/350（repeats1）。未改原图/旧权重/运行配置，未启动真实GPU训练。文档与实施计划已更新，git diff --check通过；下一项用户任务未指定。
+
+- 本轮训练逻辑审计（2026-11-13）：按用户要求核对Dataset/RGB/同步几何/色块、VAE mode+patchify+BN、三参考L坐标、Qwen padding、flow加噪/velocity/加权MSE、梯度累积、缓存、恢复和官方验证解码。新增6项独立数学/官方pipeline差分回归及1项完整batch/4+2/不足累计尾组梯度对照。核心公式未发现符号/顺序/漏归一化错误；生产代码只补 `prediction.shape == velocity.shape` 硬检查，先RED后修复，拒绝静默广播，不改变正确形状loss。详见 [训练核查](FLUX3_TRAINING_AUDIT.zh-CN.md)。
+- 本轮验证：最终 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_recolor_data test_flux3_recolor_training test_flux3_recolor_inference test_flux3_reference_trainer test_flux3_reference_training test_flux3_local_model test_flux3_math_audit -q`，54项通过；DataLoader worker在沙箱内因IPC权限受阻，获准沙箱外CPU重跑通过。FP32/BF16 VAE归一化/逆变换、解析sigma/loss/梯度、零LoRA增量及文本官方编码均通过；未重跑真实权重GPU/多卡FSDP/量化。端到端差分曾因小型VAE输入stride不同出现约1.7e-3条件token差异；权重/像素/eval/dtype相同，仅在测试统一encoder连续布局后全部Transformer输入比较通过，未放宽阈值或改生产布局，不归因为真实印花根因。
+- 本轮真实数据只读检查：当前test已是468组（历史运行423组），场景均768×1024、原色块均32×32且纯色。精确灰128代理区域外A/B逐像素一致；不能据此证明衣服内部纹理一致。未改原图/旧运行配置/权重，未启动真实模型训练；条纹/印花质量问题仍待固定样本基础模型与checkpoint对照，不宣称已解决。下一项实施任务未指定。
+
+- 本轮 FLUX Studio 离线加载修复（2026-11-12）：日志确认进入 Diffusers 顶层 download 分支，传入值未被识别为存在的本地目录；已核对普通下载目录及组件文件存在。修正 `flux_klein_reference.py` 的 CACHE_DIR 多向上一层问题；未显式设置模型变量时优先使用项目相对 `../../hf_cache/FLUX.2-klein-base-9B`，目录不存在才回退 Hub ID；显式 `OBJECT_INPAINTING_FLUX_MODEL_DIR` 仍优先，保持离线。路径断言修复前失败；修复后 CPU 一次性检查缓存路径、默认本地目录选择及显式覆盖均通过（替代推理输出），`git diff --check` 通过。未加载真实权重、未启动 GPU 或重启服务，先前可运行时的环境尚未核实。下一步：重启 Studio 后单张验证。
+
+- 本轮 Studio SAM3 路径排查（2026-11-12）：批量失败源于节点默认模型目录多向上取一层；修正 `sam3_text_mask.py`，使默认位置与启动脚本默认缓存根一致，为项目相对 `../../hf_cache/sam3`；保留 `OBJECT_INPAINTING_SAM3_MODEL_DIR` 覆盖。本地已核对目录及 config / safetensors / processor / tokenizer 文件存在，无需重新下载。一次性路径断言修复前失败、修复后通过，`git diff --check` 通过；SAM3 unittest 已启动但停留在首个 API 预览用例，未取得完成结果，不记为通过。未加载真实权重、未启动 GPU 推理或重启服务。下一步：重启 Studio 后先试跑单张，再恢复批量；真实分割效果待验证。
+
+- 本轮纹理幻觉排查（2026-11-12，只读模型/数据）：用户报告单prompt训练新增条纹/图案。查看v3 steps100/200的00047_00对照，B图与A目标均纯色，输出100步出现袖部橙色图案、200步出现大片印花；00012_00原有字样有变形。v3保存配置为rank32/alpha32、lr1e-4、G4、场景面积512²、色块128、详细固定prompt，读取history至288步，未启用prompt增强。故已确认存在纹理保真问题，不能归因随机prompt，也不能声称继续训练/改措辞能解决。源码核对flow加噪、velocity目标、独立参考流与参考脚本对应；当前只用全图velocity MSE，从噪声生成，无显式纹理保真项或输入像素保留硬约束，尚未证明具体根因。建议先固定样本/seed/推理设置做基础模型无LoRA与多个checkpoint对照，再核验训练B/A纹理一致性与mask质量，证据后决定低LR对照或结构保真约束；区域加权不能单独解决衣服内部凭空印花。未改训练参数/代码/权重，未启动GPU实验，根因与修复待验证；下一项实施任务未指定。
+
+- 本轮prompt增强（2026-11-12）：新增可选 `--prompt_augmentation`，6种固定等义英文模板保留三图角色与细节约束；按seed/样本标识起点加epoch轮换，可复现。显式prompt或caption_json优先，默认仍单指令。模板批量提前编码到共同窗口，按样本选embedding，支持caption dropout和latent缓存，训练前释放文本编码器；验证/推理固定默认prompt。配置保存模板列表，恢复检查一致性，旧单prompt配置补默认字段兼容；切换增强需新目录。指南含使用和单变量对照方案。CPU验证：新增Dataset可复现/覆盖测试通过；小模型增强+dropout+latent缓存+逐步验证+续训1项通过；原单prompt缓存精确恢复与Dataset测试共2项通过。未启动真实GPU训练或质量对照，不能断言颜色质量改善；下一项任务未指定。
+
+- 本轮默认prompt更新（2026-11-12）：按用户示例强化只改服装颜色、保留身份/纹理/光照/背景等约束，并按实际顺序明确图1涂灰定位、图2待改色完整B图、图3目标色块；颜色直接匹配图3，无未定义color_name变量。核对Dataset/collate/flow_matching_loss：原图A独立作为加噪目标及velocity监督，不混入三张干净条件图。指南同步角色与默认指令。已运行Python检查默认prompt、CLI显式覆盖、三条件常量及语法，通过；未启动训练或修改原始图片/既有运行配置。下一项任务未指定。
+
+- 本轮dataset色块放大（2026-11-12）：按用户要求，新训练在data读取时将第三条件颜色块以NEAREST独立resize到默认128×128，纯色RGB不变，不受场景max_area影响，不改test原始图片。新增 `--color_swatch_size`（默认128、16..1024的16倍数），根preprocessing_config保存color_swatch_size；默认面积与分桶两条路径均接通，验证/推理共享policy，缓存编码得到相应新尺寸。旧LoRA policy缺该字段时仍按原生尺寸推理；新128训练不能直接resume旧32配置，需新输出目录，不会热改正在运行的训练。
+- 本轮验证：先将三项色块/策略/Dataset回归跑RED，再实现。`PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_recolor_data test_flux3_reference_trainer test_flux3_recolor_inference test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_cosine_caption_dropout_validation_and_inference test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_cached_training_resume_matches_uninterrupted_parameters_rng_and_lr -v`，29项通过，涵盖RGB/原对象不变、独立预算、legacy32、Dataset尺寸/配置、缓存和小模型训练/验证/推理。增加实际保存配置及validation/inference的condition_3 PNG均128断言后，单独重跑cosine完整链路1项通过。真实00002_00样本检查场景432×576、色块128×128、RGB仍(18,18,19)，源文件SHA256与32×32尺寸未变。未启动GPU训练/质量对照，未修改旧运行配置或产物；下一项任务未指定。
+
+- 本轮rank/色块尺寸分析（2026-11-12，只读）：用户报告rank32效果欠拟合，随后询问32×32色块改128×128是否改善。核对实际配置：run2为rank16/alpha16，run3为rank32/alpha64，其余保存配置相同；不是单变量rank对照，普通PEFT缩放alpha/r由1变2。共同steps401–500训练loss均值分别0.10711/0.10474，不能据此断言rank32欠拟合；另v2为rank32/alpha32/G4/warmup100，读取时仅96个更新步，也不可直接与500步结果比较。查看相同step500的前三张对照，均能换到近黑色，未据此给出整体质量结论。
+- 当前真实FLUX.3 VAE×packing网格为16：32色块=2×2/4tokens，64=4×4/16tokens，128=8×8/64tokens；默认432×576场景每张972tokens，现预处理不主动放大32色块。128可能增强色块条件表示，但纯色信息未增加、改善尚未验证，建议固定其他超参数做尺寸对照，并同步训练/验证/推理及重建缓存，新目录运行。另当前默认4张验证A色块RGB分别(18,18,19)/(24,25,28)/(28,29,30)/(28,28,29)，全部近黑；应增加彩色覆盖再评估颜色条件。以上为分析建议，未修改训练代码/图片/运行配置，未启动实验；下一项实施任务未指定。
+
 - 本轮第100步验证崩溃修复（2026-11-12）：用户真实训练打印至step100后出现NoneType.index，触发点是validation_steps=100而非训练horizon结束。核对本地Accelerate单卡default_device返回torch.device('cuda')且index=None，旧log_validation把[None]交给torch.random.fork_rng，PyTorch get_rng_state访问None.index失败。新增cuda_device_index，在未指定索引时取当前逻辑CUDA卡；验证RNG及bitsandbytes device_map共用。物理GPU1经CUDA_VISIBLE_DEVICES=1后对应逻辑0。原流程验证先于checkpoint导致此次checkpoint-100未保存，现已改为同一步先提交checkpoint再验证。
 - 本轮实际输出检查：`outputs/flux3_recolor_smoke`含配置、split、logs和train_history，末两行steps99/100，无checkpoint或训练后LoRA，不能由loss日志恢复已丢失权重；未删除/覆盖/重启用户训练。应保留旧目录，使用新目录从头运行；TensorBoard可用logdir=outputs同时查看旧/新run。
 - 本轮验证：两项新增回归先RED（单卡索引解析、验证失败前checkpoint不存在）再修复；CPU运行单卡索引/模拟验证失败可恢复/训练中TB图像/缓存连续恢复4项通过，真实小模型adapter与RNG精确恢复。获准只用GPU1运行 `CUDA_VISIBLE_DEVICES=1 RUN_FLUX3_CUDA_TESTS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_cuda_validation -v`，1项通过：随机小型BF16模型两步每步验证、CUDA RNG恢复、checkpoint及TB steps1/2，未加载真实基础权重或改用户产物。CPU对应 `test_flux3_reference_trainer.ReferenceTrainerTests.test_single_cuda_without_explicit_index_uses_current_logical_device` 和 `test_flux3_reference_training.ReferenceTrainingIntegrationTests` 下 `test_checkpoint_is_committed_before_validation_failure_and_can_resume` / `test_tensorboard_validation_images_update_during_training_at_real_steps` / `test_cached_training_resume_matches_uninterrupted_parameters_rng_and_lr`，4项通过。未重跑完整CPU/DDP套件。下一项任务未指定。

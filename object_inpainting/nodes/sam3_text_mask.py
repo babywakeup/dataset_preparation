@@ -13,7 +13,7 @@ from ..port_types import RGBImage
 from .base import Node
 
 
-MODEL_DIR = Path(__file__).resolve().parents[4].parent / "hf_cache" / "sam3"
+MODEL_DIR = Path(__file__).resolve().parents[4] / "hf_cache" / "sam3"
 INFERENCE_LOCK = Lock()
 
 

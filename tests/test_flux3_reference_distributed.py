@@ -16,14 +16,17 @@ class DistributedReferenceTrainerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             model, data = make_tiny_repository(root / 'model'), make_dataset(root / 'data', 13)
+            captions = root / 'captions.json'
+            captions.write_text(json.dumps({f'{i}.png': 'Recolor using the swatch. ' * (i + 1) for i in range(13)}))
             base = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nnodes=1', '--nproc_per_node=2',
                     'tests/flux3_reference_ddp_worker.py', '--pretrained_model_name_or_path', str(model),
                     '--instance_data_dir', str(data), '--mixed_precision', 'no', '--report_to', 'none',
                     '--rank', '2', '--lora_alpha', '6', '--lora_dropout', '0.1', '--resolution', '32',
                     '--max_sequence_length', '8', '--text_encoder_out_layers', '1',
                     '--train_batch_size', '2', '--gradient_accumulation_steps', '2',
-                    '--cache_latents', '--checkpointing_steps', '1', '--validation_steps', '1',
-                    '--num_validation_images', '1', '--validation_inference_steps', '1']
+                    '--training_directions', 'b_to_a', 'a_to_b', '--checkpointing_steps', '1', '--validation_steps', '1',
+                    '--num_validation_images', '1', '--validation_inference_steps', '1',
+                    '--caption_json', str(captions), '--caption_dropout', '0.2']
             env = {**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'ACCELERATE_USE_CPU': 'true', 'OMP_NUM_THREADS': '1',
                    'PYTHONPATH': str(Path.cwd()) + ':' + str(Path.cwd() / 'tests'), 'PYTHONDONTWRITEBYTECODE': '1'}
             def run(output, steps, resume=False):
@@ -46,8 +49,8 @@ class DistributedReferenceTrainerTests(unittest.TestCase):
                     torch.testing.assert_close(a[name], b[name], rtol=0, atol=0)
                 shards = [json.loads((output / f'rank-artifacts/rank-{rank}.json').read_text()) for rank in (0, 1)]
                 self.assertTrue(set(shards[0]).isdisjoint(shards[1]))
-                self.assertTrue((output / 'validation-final-3/manifest.json').is_file())
-            a, b = [load_file(str(output / 'pytorch_lora_weights.safetensors')) for output in (full, resumed)]
+                self.assertTrue((output / 'validation-step-3/manifest.json').is_file())
+            a, b = [load_file(str(output / 'transformer/pytorch_lora_weights.safetensors')) for output in (full, resumed)]
             for name in a:
                 torch.testing.assert_close(a[name], b[name], rtol=0, atol=0)
 

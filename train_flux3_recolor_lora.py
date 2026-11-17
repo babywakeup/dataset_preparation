@@ -22,13 +22,13 @@ import random
 import re
 import shutil
 import tempfile
-from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-from flux3_recolor import CONDITION_FOLDERS, TARGET_FOLDER, DEFAULT_PROMPT
+from flux3_recolor import DEFAULT_PROMPT, PROMPT_VARIANTS, subdataset_config
 from flux3_recolor.config import read_json, write_json, prepare_output, validate_local_model
-from flux3_recolor.data import load_rgb, image_tensor, inspect_dataset, split_samples
+from flux3_recolor.data import load_rgb, image_tensor
+from torch.utils.data import Dataset, BatchSampler
 
 logger = logging.getLogger(__name__)
 TRAINER = 'flux3-recolor-reference'
@@ -38,20 +38,23 @@ STATE_VERSION = 2
 # ------------------------------- Arguments ---------------------------------
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description='FLUX.3 三参考图换色 LoRA（参考 DreamBooth 框架）')
-    parser.add_argument('--pretrained_model_name_or_path')
+    parser.add_argument('--pretrained_model_name_or_path', required=True)
     parser.add_argument('--instance_data_dir', help='本地四目录根目录，默认 ./test')
     parser.add_argument('--dataset_root', help='instance_data_dir 兼容别名')
     parser.add_argument('--instance_prompt')
     parser.add_argument('--prompt', help='instance_prompt 兼容别名')
+    parser.add_argument('--prompt_augmentation', action='store_true', help='训练使用6种固定语义变体；显式prompt/caption优先')
+    parser.add_argument('--training_directions', nargs='+', choices=['b_to_a', 'a_to_b'],
+                        default=['b_to_a', 'a_to_b'], help='默认合并两个方向；仅旧方向用 b_to_a')
     parser.add_argument('--caption_json', help='可选：完整文件名到 caption 的 JSON')
     parser.add_argument('--groups_json')
     parser.add_argument('--validation_fraction', type=float, default=0.1)
-    parser.add_argument('--check_dataset', action='store_true')
     parser.add_argument('--output_dir')
     parser.add_argument('--revision')
     parser.add_argument('--variant')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--resolution', type=int, default=512, help='默认等比面积预算的平方根')
+    parser.add_argument('--color_swatch_size', type=int, default=128, help='第三张颜色条件的边长，默认128；不改原文件')
     parser.add_argument('--use_aspect_ratio_buckets', action='store_true')
     parser.add_argument('--aspect_ratio_buckets', help='参考格式 H,W;H,W，或 HxW,HxW；16倍数')
     parser.add_argument('--center_crop', action='store_true')
@@ -88,10 +91,10 @@ def parse_args(input_args=None):
     parser.add_argument('--logit_mean', type=float, default=0.)
     parser.add_argument('--logit_std', type=float, default=1.)
     parser.add_argument('--mode_scale', type=float, default=1.29)
+    parser.add_argument('--train_text_encoder', action='store_true', help='训练自定义text_encoder；独立对照入口自动启用')
     parser.add_argument('--caption_dropout', type=float, default=0.)
     parser.add_argument('--max_sequence_length', type=int, default=512)
     parser.add_argument('--text_encoder_out_layers', type=int, nargs='+', default=[4, 8, 12, 16, 20, 24, 28, 32])
-    parser.add_argument('--cache_latents', action='store_true')
     parser.add_argument('--offload', action='store_true', help='VAE/text_encoder 闲置时回CPU')
     parser.add_argument('--allow_tf32', action='store_true')
     parser.add_argument('--bnb_quantization_config_path')
@@ -103,17 +106,21 @@ def parse_args(input_args=None):
     parser.add_argument('--checkpointing_steps', type=int, default=100)
     parser.add_argument('--checkpoints_total_limit', type=int)
     parser.add_argument('--resume_from_checkpoint')
+    parser.add_argument('--logging_steps', type=int, default=10, help='每N个优化器更新步记录区间平均loss，默认10')
     parser.add_argument('--logging_dir', default='logs')
     parser.add_argument('--report_to', default='tensorboard', help='none/tensorboard/wandb/comet_ml/all')
     parser.add_argument('--validation_prompt')
     parser.add_argument('--final_validation_prompt')
     parser.add_argument('--validation_epochs', type=int, default=1)
     parser.add_argument('--validation_steps', type=int, default=100, help='每N优化步更新验证图，0关闭按步验证')
-    parser.add_argument('--num_validation_images', type=int, default=4)
+    parser.add_argument('--num_validation_images', type=int, default=4, help='留出验证集总出图数')
     parser.add_argument('--validation_inference_steps', type=int, default=28)
     parser.add_argument('--skip_final_inference', '--skip_final_validation', dest='skip_final_inference', action='store_true')
     parser.add_argument('--local_rank', type=int, default=-1)
     args = parser.parse_args(input_args)
+    if len(set(args.training_directions)) != len(args.training_directions):
+        parser.error('training_directions 不能重复')
+    custom_prompt = args.instance_prompt is not None or args.prompt is not None
     for canonical, alias, default in [('instance_data_dir', 'dataset_root', './test'),
                                       ('instance_prompt', 'prompt', DEFAULT_PROMPT)]:
         first, second = getattr(args, canonical), getattr(args, alias)
@@ -121,8 +128,10 @@ def parse_args(input_args=None):
             parser.error(f'--{canonical} 与 --{alias} 不能设置不同值')
         setattr(args, canonical, first if first is not None else second if second is not None else default)
         delattr(args, alias)
+    args.training_prompts = (list(PROMPT_VARIANTS) if args.prompt_augmentation and not custom_prompt
+                             and not args.caption_json else [args.instance_prompt])
     for name in ('resolution', 'repeats', 'train_batch_size', 'num_train_epochs', 'gradient_accumulation_steps',
-                 'rank', 'max_sequence_length', 'validation_epochs', 'validation_inference_steps'):
+                 'rank', 'max_sequence_length', 'validation_epochs', 'validation_inference_steps', 'logging_steps'):
         if getattr(args, name) < 1:
             parser.error(f'{name} 必须为正整数')
     for name in ('max_train_steps', 'checkpoints_total_limit'):
@@ -143,16 +152,17 @@ def parse_args(input_args=None):
             parser.error(f'{name} 必须为有限数')
     if args.adam_weight_decay < 0 or not 16 <= args.resolution <= 1024:
         parser.error('weight decay 不能为负；resolution 必须介于16和1024')
+    if not 16 <= args.color_swatch_size <= 1024 or args.color_swatch_size % 16:
+        parser.error('color_swatch_size 必须为16..1024之间的16倍数')
     if args.aspect_ratio_buckets and not args.use_aspect_ratio_buckets:
         parser.error('--aspect_ratio_buckets 需要 --use_aspect_ratio_buckets')
-    if args.cache_latents and (args.random_flip or (args.use_aspect_ratio_buckets and not args.center_crop)):
-        parser.error('cache_latents 需要确定几何：关闭random_flip，分桶时使用center_crop')
     if args.use_8bit_adam and args.optimizer != 'adamw':
         parser.error('use_8bit_adam 只适用于 AdamW')
     if args.do_fp8_training and args.bnb_quantization_config_path:
         parser.error('FP8 与 bitsandbytes 量化不能同时启用')
-    if not args.check_dataset and not args.pretrained_model_name_or_path:
-        parser.error('训练需要本地 --pretrained_model_name_or_path；未下载时用 --check_dataset')
+    if args.train_text_encoder and (args.caption_json or args.prompt_augmentation or args.caption_dropout
+                                     or args.validation_prompt or args.final_validation_prompt):
+        parser.error('可训练text_encoder不支持caption/随机prompt/dropout/验证prompt覆盖')
     args.local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
     return args
 
@@ -171,27 +181,59 @@ def preprocessing_config(args):
         if not buckets or any(len(b) != 2 or min(b) < 16 or any(s % 16 for s in b)
                               or b[0] * b[1] > 1024 * 1024 for b in buckets):
             raise ValueError('bucket 宽高必须为正16倍数，面积不超过1MP')
-    return {'max_area': args.resolution ** 2, 'buckets': buckets,
+    return {'max_area': args.resolution ** 2, 'color_swatch_size': args.color_swatch_size, 'buckets': buckets,
             'use_aspect_ratio_buckets': args.use_aspect_ratio_buckets}
 
 
-class DreamBoothDataset:
-    """Local paired data; reproducible geometry per epoch and sample identity."""
-    def __init__(self, args, names):
-        self.args, self.root, self.names = args, Path(args.instance_data_dir), list(names)
-        self.epoch = 0
+class DreamBoothDataset(Dataset):
+    """Lazy image loading over the already split, unified HF path records."""
+    def __init__(self, args, records):
+        self.args, self.epoch = args, 0
         self.preprocessing = preprocessing_config(args)
         self.captions = read_json(args.caption_json) if args.caption_json else {}
+        self.names = [Path(row['target_path']).name for row in records]
         if args.caption_json and (not isinstance(self.captions, dict)
-                                 or any(not isinstance(v, str) for v in self.captions.values())
-                                 or not set(names).issubset(self.captions)):
+                or any(not isinstance(value, str) for value in self.captions.values())
+                or not set(self.names).issubset(self.captions)):
             raise ValueError('caption_json 必须覆盖所有训练文件名且值为字符串')
-        self.sample_ids = [f'{name}::repeat-{repeat}' for repeat in range(args.repeats) for name in names]
-        self.shapes = []
-        for name in names:
-            target, refs = self.prepare(name, 0)
-            self.shapes.append((target.size, *(image.size for image in refs)))
-        self.shapes *= args.repeats
+        self.buckets, base_buckets, valid = [], [], []
+        bucket_to_idx = {}
+        from flux3_recolor.data import SampleDataError
+        for index, row in enumerate(records):
+            try:
+                bucket = self._bucket_for_image(row['height'], row['width'])
+            except SampleDataError as exc:
+                logger.warning('跳过无效尺寸 sample=%s: %s', row['sample_id'], exc)
+                continue
+            if bucket not in bucket_to_idx:
+                bucket_to_idx[bucket] = len(self.buckets)
+                self.buckets.append(bucket)
+            base_buckets.append(bucket_to_idx[bucket])
+            valid.append(index)
+        if not valid:
+            raise ValueError('Dataset没有可用样本')
+        self.records = records.select(valid)
+        self.num_instance_images = len(self.records)
+        self.bucket_idx = base_buckets * args.repeats
+        self.sample_ids = [f"{row['sample_id']}::repeat-{repeat}" for repeat in range(args.repeats)
+                           for row in self.records]
+        self.bucket_indices = [[] for _ in self.buckets]
+        for index, bucket in enumerate(self.bucket_idx):
+            self.bucket_indices[bucket].append(index)
+
+    def _bucket_for_image(self, height, width):
+        from flux3_recolor.data import GRID, SampleDataError, bucket_geometry, grid_geometry
+        if min(height, width) < GRID:
+            raise SampleDataError(f'宽高至少为{GRID}')
+        try:
+            if self.preprocessing.get('use_aspect_ratio_buckets'):
+                _, (width, height) = bucket_geometry((width, height), self.preprocessing)
+            else:
+                _, box = grid_geometry((width, height), self.preprocessing['max_area'])
+                width, height = box[2] - box[0], box[3] - box[1]
+            return height, width
+        except ValueError as exc:
+            raise SampleDataError(str(exc)) from exc
 
     def __len__(self):
         return len(self.sample_ids)
@@ -199,23 +241,50 @@ class DreamBoothDataset:
     def set_epoch(self, epoch):
         self.epoch = epoch
 
-    def prepare(self, name, index):
-        from flux3_recolor.data import prepare_with_policy
+    def prepare(self, index):
+        from flux3_recolor.data import read_path_sample
+        row = self.records[index % self.num_instance_images]
         rng = random.Random(int.from_bytes(hashlib.sha256(
-            f'{self.args.seed}:{self.epoch}:{index}:{name}'.encode()).digest()[:8], 'big'))
-        try:
-            return prepare_with_policy(load_rgb(self.root / TARGET_FOLDER / name),
-                [load_rgb(self.root / folder / name) for folder in CONDITION_FOLDERS], self.preprocessing,
-                center_crop=self.args.center_crop, random_flip=self.args.random_flip, rng=rng)
-        except ValueError as exc:
-            raise ValueError(f'样本 {name}: {exc}') from exc
+            f'{self.args.seed}:{self.epoch}:{index}:{self.sample_ids[index]}'.encode()).digest()[:8], 'big'))
+        return read_path_sample(row, self.preprocessing, self.args.center_crop,
+                                self.args.random_flip, rng, loader=load_rgb)
+
+    def _read_index(self, index):
+        from flux3_recolor.data import SampleDataError
+        row = self.records[index % self.num_instance_images]
+        target, refs = self.prepare(index)
+        height, width = self.buckets[self.bucket_idx[index]]
+        if target.size != (width, height) or any(image.size != target.size for image in refs[:2]):
+            raise SampleDataError(f"样本 {row['sample_id']} 的实际尺寸与bucket不一致")
+        prompt = row['prompt'] or self.args.instance_prompt
+        if not self.args.caption_json and len(self.args.training_prompts) > 1:
+            offset = int.from_bytes(hashlib.sha256(f'{self.args.seed}:{self.sample_ids[index]}:prompt'.encode()).digest()[:8], 'big')
+            prompt = self.args.training_prompts[(offset + self.epoch) % len(self.args.training_prompts)]
+        return {'instance_images': image_tensor(target), 'cond_images': [image_tensor(image) for image in refs],
+                'instance_prompt': prompt, 'sample_id': self.sample_ids[index],
+                'name': Path(row['target_path']).name, 'bucket_idx': self.bucket_idx[index]}
 
     def __getitem__(self, index):
-        name = self.names[index % len(self.names)]
-        target, refs = self.prepare(name, index)
-        return {'instance_images': image_tensor(target), 'cond_images': [image_tensor(image) for image in refs],
-                'instance_prompt': self.captions.get(name) or self.args.instance_prompt,
-                'sample_id': self.sample_ids[index], 'name': name}
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        from flux3_recolor.data import SampleDataError
+        try:
+            return self._read_index(index)
+        except SampleDataError as exc:
+            logger.warning('读取失败 idx=%s sample=%s: %s；尝试其他样本', index, self.sample_ids[index], exc)
+        repeat = index // self.num_instance_images
+        candidates = list({self.sample_ids[i]: i for i in self.bucket_indices[self.bucket_idx[index]]
+                           if i // self.num_instance_images == repeat
+                           and self.sample_ids[i] != self.sample_ids[index]}.values())
+        random.Random(self.args.seed + self.epoch + index).shuffle(candidates)
+        for actual in candidates[:8]:
+            try:
+                return self._read_index(actual)
+            except SampleDataError as exc:
+                logger.warning('读取失败 idx=%s sample=%s: %s', actual, self.sample_ids[actual], exc)
+        raise SampleDataError(f'读取失败：样本 {self.sample_ids[index]} 及候选样本均不可用')
 
 
 def collate_fn(examples):
@@ -226,9 +295,9 @@ def collate_fn(examples):
             'sample_ids': [e['sample_id'] for e in examples], 'names': [e['name'] for e in examples]}
 
 
-class BucketBatchSampler:
-    """Keep small shape-compatible batches; pad whole batches to equal DDP lengths."""
-    batch_size = None  # Prevent Accelerate from refilling tails using a different bucket.
+class BucketBatchSampler(BatchSampler):
+    """Keep small bucket batches; pad whole batches to equal DDP lengths."""
+    batch_size = None
     drop_last = False
 
     def __init__(self, dataset, batch_size, seed=42, num_processes=1):
@@ -241,12 +310,10 @@ class BucketBatchSampler:
         self.dataset.set_epoch(epoch)
 
     def batches(self):
-        buckets = defaultdict(list)
-        for index, shape in enumerate(self.dataset.shapes):
-            buckets[shape].append(index)
         rng = random.Random(self.seed + self.epoch)
         batches = []
-        for indices in buckets.values():
+        for members in self.dataset.bucket_indices:
+            indices = list(members)
             rng.shuffle(indices)
             batches.extend(indices[i:i + self.requested_batch_size] for i in range(0, len(indices), self.requested_batch_size))
         rng.shuffle(batches)
@@ -264,24 +331,6 @@ class BucketBatchSampler:
         return len(self.batches())
 
 
-# ------------------------ Encoding and latent caches -----------------------
-def cache_latents(dataset, vae, device):
-    from flux3_recolor.modeling import encode_latents
-    vae.to(device)
-    cache = {}
-    for index in range(len(dataset)):
-        sample = dataset[index]
-        cache[sample['sample_id']] = tuple(encode_latents(vae, image.unsqueeze(0)).cpu()
-                                           for image in [sample['instance_images'], *sample['cond_images']])
-    return cache
-
-
-def cached_latents_for_batch(cache, sample_ids, device, dtype):
-    import torch
-    values = [torch.cat([cache[key][i] for key in sample_ids]).to(device=device, dtype=dtype) for i in range(4)]
-    return values[0], values[1:]
-
-
 def get_qwen3vl_prompt_embeds(*args, **kwargs):
     from flux3_recolor.modeling import get_qwen3vl_prompt_embeds as encode
     return encode(*args, **kwargs)
@@ -291,9 +340,20 @@ def get_qwen3vl_prompt_embeds(*args, **kwargs):
 def validate_training_resume(saved, current, state):
     if state.get('trainer') != TRAINER or state.get('version') != STATE_VERSION:
         raise ValueError('旧训练状态格式不兼容；请使用新输出目录开始训练')
+    saved = dict(saved)
+    if 'training_directions' in current and 'training_directions' not in saved:
+        saved['training_directions'] = ['b_to_a']
+        saved['subdatasets'] = subdataset_config(['b_to_a'])
+    # Older checkpoints used a single prompt and have neither augmentation field.
+    if 'prompt_augmentation' not in saved and 'training_prompts' not in saved:
+        saved['prompt_augmentation'] = False
+        saved['training_prompts'] = [saved.get('instance_prompt', saved.get('prompt', DEFAULT_PROMPT))]
+    saved.pop('cache_latents', None)
+    if 'train_text_encoder' in current:
+        saved.setdefault('train_text_encoder', False)
     mutable = {'checkpointing_steps', 'checkpoints_total_limit', 'validation_steps', 'validation_epochs',
                'num_validation_images', 'validation_inference_steps', 'skip_final_inference', 'report_to',
-               'logging_dir', 'dataloader_num_workers', 'gradient_checkpointing'}
+               'logging_dir', 'logging_steps', 'dataloader_num_workers', 'gradient_checkpointing'}
     if saved.get('lr_scheduler') == current.get('lr_scheduler') == 'constant':
         mutable |= {'max_train_steps', 'num_train_epochs'}
     for key in sorted((set(saved) | set(current)) - mutable):
@@ -401,7 +461,9 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
     from flux3_recolor.modeling import FLOW_SHIFT, validate_vae_grid, add_lora
     kwargs = {'local_files_only': True, 'revision': args.revision}
     model_kwargs = {**kwargs, 'variant': args.variant, 'torch_dtype': dtype}
-    vae = AutoencoderKLFlux2.from_pretrained(args.pretrained_model_name_or_path, subfolder='vae', **model_kwargs)
+    from flux3_recolor.precision import set_transformer_autocast
+    vae_kwargs = {**model_kwargs, 'torch_dtype': torch.float32}
+    vae = AutoencoderKLFlux2.from_pretrained(args.pretrained_model_name_or_path, subfolder='vae', **vae_kwargs)
     validate_vae_grid(vae)
     quant = None
     if args.bnb_quantization_config_path:
@@ -419,6 +481,7 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
     transformer_kwargs = {**model_kwargs, 'torch_dtype': torch.float32} if is_fsdp else model_kwargs
     transformer = Flux3Transformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder='transformer', **transformer_kwargs, **extra)
+    set_transformer_autocast(transformer, dtype)
     transformer.requires_grad_(False)
     if quant:
         from peft import prepare_model_for_kbit_training
@@ -452,12 +515,14 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
             'scheduler': FlowMatchEulerDiscreteScheduler(shift=FLOW_SHIFT, use_dynamic_shifting=False)}
 
 
-def create_optimizer(args, transformer, num_processes):
+def create_optimizer(args, transformer, num_processes, text_encoder=None):
     import torch
     lr = args.learning_rate
     if args.scale_lr:
         lr *= args.gradient_accumulation_steps * args.train_batch_size * num_processes
     parameters = [{'params': [p for p in transformer.parameters() if p.requires_grad], 'lr': lr}]
+    if text_encoder is not None:
+        parameters.append({'params': text_encoder.parameters(), 'lr': lr, 'weight_decay': 0.})
     kwargs = {'betas': (args.adam_beta1, args.adam_beta2), 'weight_decay': args.adam_weight_decay, 'eps': args.adam_epsilon}
     if args.optimizer == 'prodigy':
         from prodigyopt import Prodigy
@@ -506,15 +571,14 @@ def lora_state_dict(accelerator, transformer, is_fsdp):
     return {k: value.detach().cpu().contiguous() for k, value in state.items()}
 
 
-def export_lora(accelerator, transformer, output, args, dtype, is_fsdp):
-    from diffusers.loaders import Flux3LoraLoaderMixin
+def export_lora(accelerator, transformer, output, args, dtype, is_fsdp, text_encoder=None):
+    from flux3_recolor.component_io import save_components
     import torch
     state = lora_state_dict(accelerator, transformer, is_fsdp)
     def save():
-        save_dtype = torch.float32 if args.upcast_before_saving else dtype
-        Flux3LoraLoaderMixin.save_lora_weights(str(output),
-            transformer_lora_layers={k: v.to(save_dtype) for k, v in state.items()},
-            transformer_lora_adapter_metadata=accelerator.unwrap_model(transformer).peft_config['default'].to_dict())
+        save_components(accelerator.unwrap_model(transformer), output, args.pretrained_model_name_or_path,
+            accelerator.unwrap_model(text_encoder) if text_encoder is not None else None,
+            state=state, dtype=torch.float32 if args.upcast_before_saving else dtype)
     main_process_action(accelerator, save)
 
 
@@ -543,6 +607,13 @@ def save_checkpoint(accelerator, transformer, args, state, config, split, dtype,
 
 def make_validation_pipeline(args, components, transformer, accelerator, dtype, is_fsdp, state=None):
     from flux3_recolor.inference import build_pipeline
+    from flux3_recolor.precision import set_transformer_autocast
+    if not is_fsdp and '_validation_pipeline' in components:
+        pipeline = components['_validation_pipeline']
+        if pipeline.transformer is not accelerator.unwrap_model(transformer):
+            raise RuntimeError('验证 pipeline 与训练模型未共享对象')
+        pipeline.to(accelerator.device)
+        return pipeline
     if is_fsdp:
         from diffusers import Flux3Transformer2DModel
         from peft import set_peft_model_state_dict
@@ -552,51 +623,58 @@ def make_validation_pipeline(args, components, transformer, accelerator, dtype, 
         layers = [x.strip() for x in args.lora_layers.split(',')] if args.lora_layers else None
         add_lora(model, args.rank, args.lora_alpha, args.lora_dropout, target_modules=layers)
         set_peft_model_state_dict(model, state, adapter_name='default')
+        set_transformer_autocast(model, dtype)
         model.requires_grad_(False).eval()
     else:
         model = accelerator.unwrap_model(transformer)
-    return build_pipeline({**components, 'transformer': model}, accelerator.device)
+    pipeline_components = {**components, 'transformer': model}
+    if components.get('text_encoder') is not None:
+        pipeline_components['text_encoder'] = accelerator.unwrap_model(components['text_encoder'])
+    pipeline = build_pipeline(pipeline_components, accelerator.device)
+    if not is_fsdp:
+        components['_validation_pipeline'] = pipeline
+    return pipeline
 
 
 def log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
-                   config, split, embeddings, label, global_step):
+                   config, validation_records, embeddings, label, global_step):
+    from flux3_recolor.inference import select_validation_records
+    from flux3_recolor.validation import ValidationRuns
+    records = select_validation_records(validation_records, args.num_validation_images)
+    runs = components.setdefault('_validation_runs', ValidationRuns())
+    runs.run(global_step, config, [row['sample_id'] for row in records],
+             args.seed, args.validation_inference_steps,
+             lambda: _log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
+                                     config, records, embeddings, label, global_step))
+
+
+def _log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
+                    config, validation_records, embeddings, label, global_step):
     import torch
+    from flux3_recolor.precision import pipeline_forward
     from flux3_recolor.inference import generate_validation
+    from flux3_recolor.validation import validation_output, pipeline_text_embeddings, log_validation_images
     adapter_state = lora_state_dict(accelerator, transformer, is_fsdp) if is_fsdp else None
     def generate():
         devices = [cuda_device_index(accelerator.device)] if accelerator.device.type == 'cuda' else []
-        with torch.random.fork_rng(devices=devices), accelerator.autocast():
+        with torch.random.fork_rng(devices=devices):
             model = accelerator.unwrap_model(transformer)
             was_training = model.training
             model.eval()
-            pipeline = make_validation_pipeline(args, components, transformer, accelerator, dtype, is_fsdp, adapter_state)
+            pipeline = None
             try:
+                pipeline = make_validation_pipeline(args, components, transformer, accelerator, dtype, is_fsdp, adapter_state)
+                active_embeddings = pipeline_text_embeddings(pipeline, embeddings)
                 destination = Path(args.output_dir) / f'validation-{label}'
-                generate_validation(pipeline, args.instance_data_dir, split['validation'][:args.num_validation_images],
-                    config, destination, args.seed, args.validation_inference_steps, embeddings)
-                sample_dirs = sorted(p for p in destination.iterdir() if p.is_dir())
-                phase = 'test' if label.startswith('final-') else 'validation'
-                for tracker in accelerator.trackers:
-                    if tracker.name == 'tensorboard':
-                        import numpy as np
-                        for sample in sample_dirs:
-                            # Stable tags give each fixed sample a real step slider.
-                            # A tag per validation invocation would create disconnected plots.
-                            tracker.writer.add_image(f'{phase}/generated/{sample.name}',
-                                np.asarray(load_rgb(sample / 'generated.png')), global_step=global_step, dataformats='HWC')
-                            tracker.writer.add_image(f'{phase}/comparison/{sample.name}',
-                                np.asarray(load_rgb(sample / 'comparison.png')), global_step=global_step, dataformats='HWC')
-                        tracker.writer.flush()  # Visible while training continues, not only at end_training.
-                    elif tracker.name == 'wandb':
-                        import wandb
-                        tracker.log({f'{phase}/generated': [wandb.Image(load_rgb(p / 'generated.png'), caption=p.name)
-                                                          for p in sample_dirs],
-                                     f'{phase}/comparison': [wandb.Image(load_rgb(p / 'comparison.png'), caption=p.name)
-                                                           for p in sample_dirs]}, step=global_step)
+                with validation_output(destination, protected=[args.instance_data_dir]) as staging:
+                    with pipeline_forward(pipeline.transformer):
+                        generate_validation(pipeline, args.instance_data_dir, validation_records,
+                            config, staging, args.seed, args.validation_inference_steps, active_embeddings)
+                log_validation_images(accelerator.trackers, destination, label, global_step)
             finally:
                 del pipeline
                 model.train(was_training)
-                if args.offload or args.cache_latents:
+                if args.offload:
                     components['vae'].to('cpu')
                 if accelerator.device.type == 'cuda':
                     torch.cuda.empty_cache()
@@ -604,38 +682,31 @@ def log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
     accelerator.wait_for_everyone()
 
 
+def prepare_path_dataset(args, sample_names=None):
+    """Reuse metadata across training runs; output/model/LR do not affect it."""
+    from flux3_recolor.dataset_cache import prepare_cached_dataset
+    config = {'root': str(Path(args.instance_data_dir).expanduser().resolve()),
+        'directions': args.training_directions, 'validation_fraction': args.validation_fraction,
+        'seed': args.seed, 'prompt': args.instance_prompt,
+        'captions': read_json(args.caption_json) if args.caption_json else None,
+        'source_groups': read_json(args.groups_json) if args.groups_json else None,
+        'sample_names': sample_names}
+    return prepare_cached_dataset(config, num_proc=max(1, args.dataloader_num_workers))
+
+
 # --------------------------------- Training --------------------------------
 def main(input_args=None):
     args = input_args if isinstance(input_args, argparse.Namespace) else parse_args(input_args)
     policy = preprocessing_config(args)
-
-    def inspect():
-        report = inspect_dataset(args.instance_data_dir)
-        groups = read_json(args.groups_json) if args.groups_json else None
-        split = split_samples(report['names'], args.validation_fraction, args.seed, groups)
-        # Decode and check effective geometry for the entire held-out set as well.
-        DreamBoothDataset(args, report['names'])
-        return report, split
-
-    if args.check_dataset:
-        report, split = inspect()
-        print(json.dumps({k: v for k, v in report.items() if k != 'names'}, ensure_ascii=False, indent=2))
-        print(f"train={len(split['train'])} validation={len(split['validation'])}")
-        if args.output_dir:
-            output = prepare_output(args.output_dir, protected=[Path(args.instance_data_dir) / folder
-                                      for folder in (TARGET_FOLDER, *CONDITION_FOLDERS)])
-            write_json(output / 'dataset_report.json', report)
-            write_json(output / 'split.json', split)
-        return report
-
     args.output_dir = str(Path(args.output_dir or 'outputs/flux3_recolor').expanduser().resolve())
-    checkpoint = resolve_training_checkpoint(args.output_dir, args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+    checkpoint = (resolve_training_checkpoint(args.output_dir, args.resume_from_checkpoint)
+                  if args.resume_from_checkpoint else None)
 
     import torch
     from accelerate import Accelerator, DataLoaderConfiguration
     from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
     from diffusers.optimization import get_scheduler
-    from flux3_recolor.modeling import encode_latents, flow_matching_loss, text_position_ids, load_adapter_state, save_adapter
+    from flux3_recolor.modeling import encode_recolor_latents, flow_matching_loss, text_position_ids, load_adapter_state
 
     args.pretrained_model_name_or_path, model_signature = validate_local_model(args.pretrained_model_name_or_path)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -651,14 +722,24 @@ def main(input_args=None):
     if args.mixed_precision != 'no' and accelerator.device.type != 'cuda':
         raise ValueError('CPU训练请显式使用 --mixed_precision no')
     is_fsdp = validate_optional_features(args, accelerator)
+    if args.train_text_encoder and is_fsdp:
+        raise ValueError('可训练text_encoder暂支持单卡/DDP，不支持FSDP')
     set_seed(args.seed)
     if args.allow_tf32 and accelerator.device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
     dtype = {'no': torch.float32, 'fp16': torch.float16, 'bf16': torch.bfloat16}[args.mixed_precision]
-    report, split = main_process_action(accelerator, inspect)
+    main_process_action(accelerator, lambda: str(prepare_output(args.output_dir,
+        protected=[args.instance_data_dir, args.pretrained_model_name_or_path], resume=checkpoint is not None)))
+    path_dataset = main_process_action(accelerator, lambda: prepare_path_dataset(args))
+    accelerator.print(f'路径Dataset: {path_dataset}')
+    from datasets import load_from_disk
+    prepared = load_from_disk(path_dataset)
+    split = {name: list(rows['sample_id']) for name, rows in prepared.items()}
+    report = {'path_dataset': path_dataset, 'dataset_format': 'recolor_paths_v1',
+              'train_records': len(prepared['train']), 'validation_records': len(prepared['validation'])}
     if not args.groups_json:
         accelerator.print('拆分按完整文件名主干；不同文件名的同源衍生图请提供 --groups_json。')
-    dataset = DreamBoothDataset(args, split['train'])
+    dataset = DreamBoothDataset(args, prepared['train'])
     batch_sampler = BucketBatchSampler(dataset, args.train_batch_size, args.seed, accelerator.num_processes)
     generator = torch.Generator().manual_seed(args.seed)
     train_dataloader = torch.utils.data.DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn,
@@ -670,15 +751,19 @@ def main(input_args=None):
 
     config = {key: value for key, value in vars(args).items() if key not in {
         'instance_data_dir', 'output_dir', 'pretrained_model_name_or_path', 'groups_json',
-        'caption_json', 'resume_from_checkpoint', 'local_rank', 'check_dataset', 'bnb_quantization_config_path'}}
+        'caption_json', 'resume_from_checkpoint', 'local_rank', 'bnb_quantization_config_path'}}
     config.update(format_version=1, trainer=TRAINER, training_state_version=STATE_VERSION,
         model_path=args.pretrained_model_name_or_path, model_config_signature=model_signature,
-        fingerprint=report['fingerprint'], split=split, world_size=accelerator.num_processes,
-        condition_folders=list(CONDITION_FOLDERS), target_folder=TARGET_FOLDER, grid=16,
+        split=split, world_size=accelerator.num_processes,
+        dataset_format='recolor_paths_v1', dataset_path=path_dataset,
+        weights_layout='components_v1', condition_order=['gray', 'source', 'swatch'],
+        dataset_root=str(Path(args.instance_data_dir).resolve()), grid=16,
         max_area=args.resolution ** 2, preprocessing=policy, prompt=args.instance_prompt,
         captions_digest=hashlib.sha256(json.dumps(dataset.captions, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
         quantization_config=read_json(args.bnb_quantization_config_path) if args.bnb_quantization_config_path else None,
         distributed_type=accelerator.distributed_type.name)
+    if args.train_text_encoder:
+        config['text_encoder_format'] = 'transformers_v1'
     config = json.loads(json.dumps(config))  # Normalize tuples to the persisted JSON form.
     state = {'trainer': TRAINER, 'version': STATE_VERSION, 'global_step': 0, 'epoch': 0, 'batch_offset': 0}
     if checkpoint is not None:
@@ -690,44 +775,51 @@ def main(input_args=None):
             raise ValueError('max_train_steps 必须大于checkpoint已完成步数')
         if any(int(p.name.split('-')[-1]) > state['global_step'] for p in owned_checkpoints(args.output_dir)):
             raise ValueError('已有更晚的完成checkpoint，请从latest恢复，避免覆盖后续产物')
-    main_process_action(accelerator, lambda: str(prepare_output(args.output_dir,
-        protected=[args.instance_data_dir, args.pretrained_model_name_or_path], resume=checkpoint is not None)))
-
     components = load_training_components(args, accelerator, dtype, is_fsdp)
     transformer, vae = components['transformer'], components['vae']
-    optimizer = create_optimizer(args, transformer, accelerator.num_processes)
-    lr_scheduler = get_scheduler(args.lr_scheduler, optimizer=optimizer, num_warmup_steps=args.lr_warmup_steps,
-                                 num_training_steps=args.max_train_steps, num_cycles=args.lr_num_cycles, power=args.lr_power)
 
     def compute_text_embeddings(prompts, pad_to_length=None):
         encoder = components['text_encoder']
         with offload_models(encoder, accelerator.device, args.offload, sharded=args.fsdp_text_encoder):
             embeds = get_qwen3vl_prompt_embeds(encoder, components['tokenizer'], prompts, accelerator.device, dtype,
                 args.text_encoder_out_layers, args.max_sequence_length, pad_to_length=pad_to_length)
-        if embeds.shape[-1] != transformer.config.joint_attention_dim:
+        if embeds.shape[-1] != accelerator.unwrap_model(transformer).config.joint_attention_dim:
             raise ValueError('所选文本隐藏层维度与Transformer joint_attention_dim不一致')
         return embeds
 
     # Fixed prompt is encoded once. Custom captions remain online so each shuffled
     # batch gets exactly its largest window, rather than a stale batch-index cache.
     fixed_embeddings = compute_text_embeddings(args.instance_prompt) if not args.caption_json else None
+    text_encoder = None
+    if args.train_text_encoder:
+        from flux3_recolor.text_encoder import TextEncoderModel
+        text_encoder = TextEncoderModel.from_features(fixed_embeddings).to(accelerator.device)
+    optimizer = create_optimizer(args, transformer, accelerator.num_processes, text_encoder)
+    lr_scheduler = get_scheduler(args.lr_scheduler, optimizer=optimizer, num_warmup_steps=args.lr_warmup_steps,
+                                 num_training_steps=args.max_train_steps, num_cycles=args.lr_num_cycles, power=args.lr_power)
+    prompt_embeddings = {}
+    if len(args.training_prompts) > 1:
+        # Encode together for a common token window; preserve per-prompt attention masks.
+        encoded_prompts = compute_text_embeddings(args.training_prompts)
+        prompt_embeddings = {prompt: encoded_prompts[i:i + 1] for i, prompt in enumerate(args.training_prompts)}
+        fixed_embeddings = None
     fixed_empty = compute_text_embeddings('', fixed_embeddings.shape[1]) if fixed_embeddings is not None and args.caption_dropout else None
+    if prompt_embeddings and args.caption_dropout:
+        fixed_empty = compute_text_embeddings('', encoded_prompts.shape[1])
     validation_embeddings = {}
     if args.num_validation_images:
         negative = compute_text_embeddings('')
         for prompt in {args.validation_prompt or args.instance_prompt,
                        args.validation_prompt or args.final_validation_prompt or args.instance_prompt}:
-            validation_embeddings[prompt] = (compute_text_embeddings(prompt), negative)
+            positive = (fixed_embeddings if prompt == args.instance_prompt and fixed_embeddings is not None
+                        else compute_text_embeddings(prompt))
+            validation_embeddings[prompt] = (positive, negative)
     if not args.caption_json:
         encoder = components.pop('text_encoder')
         if not args.fsdp_text_encoder:
             encoder.to('cpu')
         del encoder
         components.pop('tokenizer')
-    latent_cache = None
-    if args.cache_latents:
-        with offload_models(vae, accelerator.device, offload=True):
-            latent_cache = cache_latents(dataset, vae, accelerator.device)
     if accelerator.device.type == 'cuda':
         torch.cuda.empty_cache()
 
@@ -736,17 +828,28 @@ def main(input_args=None):
     handles = []
     if not is_fsdp:
         def save_model_hook(models, weights, directory):
-            if accelerator.is_main_process:
-                save_adapter(accelerator.unwrap_model(transformer), directory)
+            from flux3_recolor.component_io import save_components
+            main_process_action(accelerator, lambda: save_components(
+                accelerator.unwrap_model(transformer), directory, args.pretrained_model_name_or_path,
+                accelerator.unwrap_model(text_encoder) if text_encoder is not None else None))
             weights.clear()
         def load_model_hook(models, directory):
-            load_adapter_state(accelerator.unwrap_model(transformer), directory)
+            load_adapter_state(accelerator.unwrap_model(transformer), Path(directory) / 'transformer')
+            if args.train_text_encoder:
+                from flux3_recolor.text_encoder import load_text_encoder_into
+                load_text_encoder_into(accelerator.unwrap_model(text_encoder), directory)
             models.clear()
         handles = [accelerator.register_save_state_pre_hook(save_model_hook),
                    accelerator.register_load_state_pre_hook(load_model_hook)]
 
-    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, train_dataloader, lr_scheduler)
+    if text_encoder is not None:
+        transformer, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer, text_encoder, optimizer, train_dataloader, lr_scheduler)
+        components['text_encoder'] = text_encoder
+    else:
+        transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer, optimizer, train_dataloader, lr_scheduler)
+    training_models = [transformer] + ([text_encoder] if text_encoder is not None else [])
     if len(train_dataloader) != local_batches:
         raise ValueError('分片后的DataLoader长度与分桶计划不符')
     def persist_config():
@@ -761,6 +864,8 @@ def main(input_args=None):
         accelerator.load_state(str(checkpoint))
     accelerator.print(f"Training: {len(dataset)} samples; {local_batches} batches/rank/epoch; "
                       f"{accelerator.num_processes} processes; {args.max_train_steps} optimizer steps")
+    from flux3_recolor.training_logging import TrainingLogger
+    training_logger = TrainingLogger(args, accelerator, state['global_step'])
     epoch = state['epoch']
     optimizer.zero_grad(set_to_none=True)
     try:
@@ -772,6 +877,7 @@ def main(input_args=None):
             plan = batch_sampler.batches()
             start_offset = state['batch_offset'] if state['epoch'] == epoch else 0
             group_loss = torch.zeros((), device=accelerator.device)
+            group_count = 0
             transformer.train()
             for batch_index, batch in enumerate(train_dataloader):
                 if batch_index < start_offset:
@@ -781,14 +887,12 @@ def main(input_args=None):
                 group_samples = sum(len(indices) for indices in
                     plan[group_start * accelerator.num_processes:group_end * accelerator.num_processes])
                 batch_size = len(batch['sample_ids'])
-                with accelerator.accumulate(transformer):
-                    if latent_cache is not None:
-                        target, references = cached_latents_for_batch(latent_cache, batch['sample_ids'], accelerator.device, dtype)
-                    else:
-                        with offload_models(vae, accelerator.device, args.offload):
-                            target = encode_latents(vae, batch['pixel_values'])
-                            references = [encode_latents(vae, pixels) for pixels in batch['cond_pixel_values']]
-                    embeds = (fixed_embeddings.repeat(batch_size, 1, 1) if fixed_embeddings is not None
+                with accelerator.accumulate(*training_models):
+                    with offload_models(vae, accelerator.device, args.offload):
+                        target, references = encode_recolor_latents(vae, batch['pixel_values'], batch['cond_pixel_values'])
+                    embeds = (text_encoder(batch_size=batch_size).last_hidden_state.to(dtype=dtype) if text_encoder is not None
+                              else torch.cat([prompt_embeddings[p] for p in batch['prompts']]) if prompt_embeddings
+                              else fixed_embeddings.repeat(batch_size, 1, 1) if fixed_embeddings is not None
                               else compute_text_embeddings(batch['prompts']))
                     if args.caption_dropout:
                         empty = fixed_empty if fixed_empty is not None else compute_text_embeddings('', embeds.shape[1])
@@ -796,14 +900,17 @@ def main(input_args=None):
                         embeds = embeds.clone()
                         embeds[drop] = empty
                     with accelerator.autocast():
-                        loss = flow_matching_loss(transformer, target, references, embeds,
+                        per_sample_loss = flow_matching_loss(transformer, target, references, embeds,
                             text_position_ids(embeds.shape[1], accelerator.device), components['scheduler'],
                             weighting_scheme=args.weighting_scheme, logit_mean=args.logit_mean,
-                            logit_std=args.logit_std, mode_scale=args.mode_scale)
+                            logit_std=args.logit_std, mode_scale=args.mode_scale, return_per_sample=True,
+                            compute_dtype=dtype)
+                        loss = per_sample_loss.mean()
                     finite = accelerator.reduce(torch.isfinite(loss).to(torch.int), reduction='sum')
                     if finite.item() != accelerator.num_processes:
                         raise FloatingPointError(f'非有限loss；当前rank样本: {batch["names"]}')
                     group_loss += loss.detach().float() * batch_size
+                    group_count += batch_size
                     # Accelerator divides by accumulation_steps; DDP averages ranks.
                     # Correct both factors, including undersized final accumulation groups.
                     factor = args.gradient_accumulation_steps * accelerator.num_processes * batch_size / group_samples
@@ -811,7 +918,7 @@ def main(input_args=None):
                     if accelerator.sync_gradients:
                         # Accelerate recognizes the full list to dispatch FSDP's global norm.
                         # Frozen parameters have grad=None and are safely ignored.
-                        accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+                        accelerator.clip_grad_norm_((p for model in training_models for p in model.parameters()), args.max_grad_norm)
                     optimizer.step()
                     successful = accelerator.sync_gradients and not accelerator.optimizer_step_was_skipped
                     if successful:
@@ -821,45 +928,44 @@ def main(input_args=None):
                 state.update(epoch=epoch + 1 if end_epoch else epoch, batch_offset=0 if end_epoch else batch_index + 1)
                 if not accelerator.sync_gradients:
                     continue
-                total_loss = accelerator.reduce(group_loss, reduction='sum').item() / group_samples
-                group_loss.zero_()
                 if not successful:
+                    group_loss.zero_()
+                    group_count = 0
                     accelerator.print('FP16 optimizer step skipped; 未推进LR或global_step')
                     continue
                 state['global_step'] += 1
                 global_step = state['global_step']
-                logs = {'loss': total_loss, 'lr': lr_scheduler.get_last_lr()[0]}
-                accelerator.log(logs, step=global_step)
-                accelerator.print(f'step={global_step}/{args.max_train_steps} loss={total_loss:.6f} lr={logs["lr"]:.8g}')
-                if accelerator.is_main_process:
-                    with (Path(args.output_dir) / 'train_history.jsonl').open('a', encoding='utf-8') as stream:
-                        stream.write(json.dumps({'step': global_step, **logs}) + '\n')
+                training_logger.step(group_loss, group_count, global_step, lr_scheduler.get_last_lr()[0])
+                group_loss.zero_()
+                group_count = 0
                 # Commit recoverable training state before fallible validation/rendering.
                 if args.checkpointing_steps and global_step % args.checkpointing_steps == 0:
                     save_checkpoint(accelerator, transformer, args, state, config, split, dtype, is_fsdp)
                 if args.num_validation_images and args.validation_steps and global_step % args.validation_steps == 0:
                     prompt = args.validation_prompt or args.instance_prompt
                     log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
-                        {**config, 'prompt': prompt}, split, validation_embeddings[prompt], f'step-{global_step}', global_step)
+                        {**config, 'prompt': prompt}, prepared['validation'], validation_embeddings[prompt], f'step-{global_step}', global_step)
                 if state['global_step'] >= args.max_train_steps:
                     break
             if state['epoch'] == epoch + 1 and args.num_validation_images and (epoch + 1) % args.validation_epochs == 0:
                 prompt = args.validation_prompt or args.instance_prompt
                 log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
-                    {**config, 'prompt': prompt}, split, validation_embeddings[prompt],
+                    {**config, 'prompt': prompt}, prepared['validation'], validation_embeddings[prompt],
                     f'epoch-{epoch + 1}-step-{state["global_step"]}', state['global_step'])
             epoch += 1
-        export_lora(accelerator, transformer, args.output_dir, args, dtype, is_fsdp)
+        export_lora(accelerator, transformer, args.output_dir, args, dtype, is_fsdp, text_encoder)
         main_process_action(accelerator, lambda: write_json(Path(args.output_dir) / 'training_state.json', state))
         if args.num_validation_images and not args.skip_final_inference:
             prompt = args.validation_prompt or args.final_validation_prompt or args.instance_prompt
             log_validation(args, accelerator, components, transformer, dtype, is_fsdp,
-                {**config, 'prompt': prompt}, split, validation_embeddings[prompt], f'final-{state["global_step"]}', state['global_step'])
+                {**config, 'prompt': prompt}, prepared['validation'], validation_embeddings[prompt], f'final-{state["global_step"]}', state['global_step'])
         accelerator.wait_for_everyone()
         accelerator.print(f'LoRA saved: {args.output_dir}')
         # Return the trained model for programmatic use; CLI callers simply ignore it.
-        return {'state': state, 'model': None if is_fsdp else accelerator.unwrap_model(transformer)}
+        return {'state': state, 'model': None if is_fsdp else accelerator.unwrap_model(transformer),
+                'text_encoder': accelerator.unwrap_model(text_encoder) if text_encoder is not None else None}
     finally:
+        training_logger.close()
         for handle in handles:
             handle.remove()
         accelerator.end_training()

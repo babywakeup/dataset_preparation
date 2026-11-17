@@ -12,7 +12,7 @@ from .base import Node
 
 
 MODEL_ID = "black-forest-labs/FLUX.2-klein-base-9B"
-CACHE_DIR = Path(__file__).resolve().parents[4].parent / "hf_cache"
+CACHE_DIR = Path(__file__).resolve().parents[4] / "hf_cache"
 INFERENCE_LOCK = Lock()
 
 
@@ -102,7 +102,11 @@ class FluxKleinReferenceNode(Node):
                 or (device.index is not None and device.index >= torch.cuda.device_count())
             ):
                 raise ValueError("FLUX CUDA 设备不可用，编号相对于 CUDA_VISIBLE_DEVICES。")
-            model = os.environ.get("OBJECT_INPAINTING_FLUX_MODEL_DIR", MODEL_ID)
+            local_model = CACHE_DIR / "FLUX.2-klein-base-9B"
+            model = os.environ.get(
+                "OBJECT_INPAINTING_FLUX_MODEL_DIR",
+                str(local_model) if local_model.is_dir() else MODEL_ID,
+            )
             if Path(model).expanduser().is_dir():
                 model = str(Path(model).expanduser().resolve())
             with INFERENCE_LOCK, torch.inference_mode():

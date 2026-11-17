@@ -19,8 +19,12 @@
 import torch
 
 FLOW_SHIFT = 6.93
-LORA_TARGETS = ['to_q', 'to_k', 'to_v', 'to_out.0', 'ff.linear_in', 'ff.linear_out']
-
+LORA_TARGETS = [
+    'to_q', 'to_k', 'to_v', 'to_out.0',
+    'ff.linear_in', 'ff.linear_out',
+    'early_stream_modulations.image_cond.linear',
+    'single_stream_modulations.image_cond.linear',
+]
 
 def patchify_latents(latents):
     b, c, h, w = latents.shape
@@ -58,11 +62,32 @@ def reference_tokens(latents):
 
 @torch.no_grad()
 def encode_latents(vae, pixels):
-    pixels = pixels.to(device=vae.device, dtype=vae.dtype)
-    latent = patchify_latents(vae.encode(pixels).latent_dist.mode())
-    mean = vae.bn.running_mean.to(latent).view(1, -1, 1, 1)
-    std = (vae.bn.running_var.to(latent).view(1, -1, 1, 1) + vae.config.batch_norm_eps).sqrt()
-    return (latent - mean) / std
+    pixels = pixels.to(device=vae.device, dtype=vae.dtype).contiguous(memory_format=torch.channels_last)
+    with torch.autocast(pixels.device.type, enabled=False):
+        latent = patchify_latents(vae.encode(pixels).latent_dist.mode())
+        mean = vae.bn.running_mean.to(latent).view(1, -1, 1, 1)
+        std = (vae.bn.running_var.to(latent).view(1, -1, 1, 1) + vae.config.batch_norm_eps).sqrt()
+        return (latent - mean) / std
+
+
+@torch.no_grad()
+def encode_recolor_latents(vae, target, reference_pixels):
+    """Encode the aligned scenes together and the independent swatch separately."""
+    if len(reference_pixels) != 3:
+        raise ValueError('需要三张条件图')
+    if target.ndim != 4 or any(pixels.ndim != 4 for pixels in reference_pixels):
+        raise ValueError('图片必须为 BCHW tensor')
+    batch = target.shape[0]
+    if batch < 1 or any(pixels.shape[0] != batch for pixels in reference_pixels):
+        raise ValueError('目标与条件 batch 大小必须一致且非空')
+    if any(pixels.shape != target.shape for pixels in reference_pixels[:2]):
+        raise ValueError('目标与条件场景形状必须一致')
+    if reference_pixels[2].shape[1] != target.shape[1]:
+        raise ValueError('目标与色块通道数必须一致')
+    scenes = encode_latents(vae, torch.cat([target, *reference_pixels[:2]], dim=0))
+    target_latent, gray_latent, source_latent = scenes.split(batch, dim=0)
+    swatch_latent = encode_latents(vae, reference_pixels[2])
+    return target_latent, [gray_latent, source_latent, swatch_latent]
 
 
 def validate_vae_grid(vae):
@@ -86,7 +111,8 @@ def add_lora(transformer, rank, alpha, dropout, target_modules=None):
 
 
 def flow_matching_loss(model, target, references, embeddings, text_ids, scheduler,
-                       weighting_scheme='none', logit_mean=0., logit_std=1., mode_scale=1.29):
+                       weighting_scheme='none', logit_mean=0., logit_std=1., mode_scale=1.29,
+                       return_per_sample=False, compute_dtype=None):
     from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
     batch = target.shape[0]
     noise = torch.randn_like(target)
@@ -96,14 +122,18 @@ def flow_matching_loss(model, target, references, embeddings, text_ids, schedule
     sigmas = scheduler.sigmas.to(device=target.device, dtype=target.dtype)[indices].reshape(batch, 1, 1, 1)
     noisy = (1 - sigmas) * target + sigmas * noise
     cond_tokens, cond_ids = reference_tokens(references)
+    forward_dtype = compute_dtype or target.dtype
     pred = model(
-        hidden_states=pack_latents(noisy), img_ids=image_position_ids(*target.shape[-2:], target.device),
-        timestep=sigmas.reshape(batch), image_cond_hidden_states=cond_tokens, image_cond_ids=cond_ids,
-        encoder_hidden_states=embeddings, txt_ids=text_ids, return_dict=False,
+        hidden_states=pack_latents(noisy).to(forward_dtype), img_ids=image_position_ids(*target.shape[-2:], target.device),
+        timestep=sigmas.reshape(batch).to(forward_dtype), image_cond_hidden_states=cond_tokens.to(forward_dtype), image_cond_ids=cond_ids,
+        encoder_hidden_states=embeddings.to(forward_dtype), txt_ids=text_ids, return_dict=False,
     )[0]
     velocity = pack_latents(noise - target)
+    if pred.shape != velocity.shape:
+        raise ValueError(f'预测与velocity目标形状不一致: prediction={tuple(pred.shape)}, target={tuple(velocity.shape)}')
     weighting = compute_loss_weighting_for_sd3(weighting_scheme, sigmas.reshape(batch, 1, 1))
-    return (weighting.float() * (pred.float() - velocity.float()).square()).mean()
+    per_sample = (weighting.float() * (pred.float() - velocity.float()).square()).mean(dim=(1, 2))
+    return per_sample if return_per_sample else per_sample.mean()
 
 
 @torch.no_grad()
@@ -169,12 +199,14 @@ def load_components(model_path, dtype, device):
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
     kwargs = {'local_files_only': True}
     model_path = str(resolve_model_root(model_path))
-    vae = AutoencoderKLFlux2.from_pretrained(model_path, subfolder='vae', torch_dtype=dtype, **kwargs)
+    from .precision import set_transformer_autocast
+    vae = AutoencoderKLFlux2.from_pretrained(model_path, subfolder='vae', torch_dtype=torch.float32, **kwargs)
     validate_vae_grid(vae)
     transformer = Flux3Transformer2DModel.from_pretrained(model_path, subfolder='transformer', torch_dtype=dtype, **kwargs)
     text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
         model_path, subfolder='text_encoder', torch_dtype=dtype, **kwargs)
     tokenizer = AutoProcessor.from_pretrained(str(Path(model_path) / tokenizer_subfolder(model_path)), **kwargs)
+    set_transformer_autocast(transformer, dtype)
     for model in (vae, transformer, text_encoder):
         model.requires_grad_(False).eval().to(device)
     return {

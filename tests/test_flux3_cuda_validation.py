@@ -27,6 +27,7 @@ class CudaValidationTests(unittest.TestCase):
             output = root / 'trained'
             main(['--pretrained_model_name_or_path', str(model), '--instance_data_dir', str(data),
                   '--output_dir', str(output), '--max_train_steps', '2', '--mixed_precision', 'bf16',
+                  '--training_directions', 'b_to_a',
                   '--rank', '2', '--lora_alpha', '2', '--max_sequence_length', '8',
                   '--text_encoder_out_layers', '1', '--report_to', 'tensorboard',
                   '--checkpointing_steps', '1', '--validation_steps', '1',

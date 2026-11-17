@@ -44,8 +44,10 @@ class RecolorInferenceTests(unittest.TestCase):
                 (root / folder).mkdir(parents=True)
                 Image.new('RGB', (32, 32), 'red').save(root / folder / 'example.png')
             output = Path(tmp) / 'validation'
-            generate_validation(pipeline, root, ['example.png'], {'max_area': 1024}, output, 42, 1, embeddings)
-            sample = output / 'example.png'
+            from build_flux3_recolor_dataset import generate_samples
+            records = list(generate_samples(root, 'b_to_a', ['example.png'], 0))
+            generate_validation(pipeline, root, records, {'max_area': 1024}, output, 42, 1, embeddings)
+            sample = output / '0000'
             with Image.open(sample / 'generated.png') as image:
                 self.assertEqual(image.size, (32, 32))
             with Image.open(sample / 'comparison.png') as image:
@@ -54,7 +56,7 @@ class RecolorInferenceTests(unittest.TestCase):
             # Validation sampling must never mutate the 1000-step training noise schedule.
             torch.testing.assert_close(scheduler.sigmas, original_sigmas, rtol=0, atol=0)
             with self.assertRaises(ValueError):
-                generate_validation(pipeline, root, ['example.png'], {'max_area': 1024}, output, 42, 1, embeddings)
+                generate_validation(pipeline, root, records, {'max_area': 1024}, output, 42, 1, embeddings)
             # Explicit training bucket is authoritative during inference, too.
             from flux3_recolor.inference import generate_sample
             config = {'max_area': 1024, 'preprocessing': {'max_area': 1024,

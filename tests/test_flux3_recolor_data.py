@@ -67,11 +67,27 @@ class RecolorDataTests(unittest.TestCase):
         self.assertEqual(target.size, (32, 48))
         self.assertEqual(target.tobytes(), conditions[0].tobytes())
         self.assertEqual(target.tobytes(), conditions[1].tobytes())
-        self.assertEqual(conditions[2].size, (32, 32))
+        self.assertEqual(conditions[2].size, (128, 128))
         self.assertEqual(conditions[2].getpixel((0, 0)), (220, 20, 80))
+        self.assertEqual(conditions[2].getextrema(), ((220, 220), (20, 20), (80, 80)))
+        self.assertEqual(swatch.size, (32, 32))
         again, refs = prepare_images(target, conditions, 2048)
         self.assertEqual(again.tobytes(), target.tobytes())
         self.assertEqual([x.tobytes() for x in refs], [x.tobytes() for x in conditions])
+
+    def test_swatch_policy_is_independent_of_scene_budget_and_preserves_legacy(self):
+        from flux3_recolor.data import prepare_with_policy
+        scene = Image.new('RGB', (64, 96), 'gray')
+        swatch = Image.new('RGB', (32, 32), (12, 45, 78))
+        refs = [scene, scene, swatch]
+        for buckets in [None, [[32, 48]]]:
+            policy = {'max_area': 1024, 'color_swatch_size': 128,
+                      'use_aspect_ratio_buckets': buckets is not None, 'buckets': buckets}
+            _, prepared = prepare_with_policy(scene, refs, policy)
+            self.assertEqual(prepared[2].size, (128, 128))
+            self.assertEqual(prepared[2].getextrema(), ((12, 12), (45, 45), (78, 78)))
+        _, legacy = prepare_with_policy(scene, refs, {'max_area': 1024})
+        self.assertEqual(legacy[2].size, (32, 32))
 
     def test_exif_orientation_and_rgb_are_applied_before_geometry_check(self):
         from flux3_recolor.data import load_rgb
@@ -84,20 +100,15 @@ class RecolorDataTests(unittest.TestCase):
         self.assertEqual(actual.mode, 'RGB')
         self.assertEqual(actual.size, (64, 48))
 
-    def test_check_cli_needs_no_model_and_persists_split(self):
-        import json
+    def test_cli_requires_model_and_rejects_removed_check_flag(self):
         import subprocess
         import sys
-        output = self.root / 'reports'
-        result = subprocess.run(
-            [sys.executable, 'train_flux3_recolor_lora.py', '--check_dataset',
-             '--dataset_root', str(self.root), '--output_dir', str(output)],
-            text=True, capture_output=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        split = json.loads((output / 'split.json').read_text())
-        self.assertEqual(len(split['train']), 9)
-        self.assertEqual(len(split['validation']), 1)
+        for arguments, message in [([], '--pretrained_model_name_or_path'),
+                (['--pretrained_model_name_or_path', 'unused-local-model', '--check_dataset'], 'unrecognized arguments')]:
+            result = subprocess.run([sys.executable, 'train_flux3_recolor_lora.py', *arguments],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(message, result.stderr)
 
     def test_output_protection_rejects_nonempty_and_input_overlap(self):
         from flux3_recolor.config import prepare_output

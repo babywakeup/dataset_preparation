@@ -1,3 +1,4 @@
+from flux3_recolor_test_utils import make_training_dataset
 """Reference-style trainer contracts; all model fixtures are generated locally."""
 
 import tempfile
@@ -21,11 +22,48 @@ class ReferenceTrainerTests(unittest.TestCase):
 
     def args(self, *extra):
         from train_flux3_recolor_lora import parse_args
-        return parse_args(['--check_dataset', '--instance_data_dir', str(self.root), '--report_to', 'none', *extra])
+        return parse_args(['--pretrained_model_name_or_path', 'unused-local-model', '--instance_data_dir', str(self.root), '--report_to', 'none',
+                           '--training_directions', 'b_to_a', *extra])
+
+    def test_prompt_augmentation_is_reproducible_and_custom_prompt_wins(self):
+        from flux3_recolor import DEFAULT_PROMPT
+        dataset = make_training_dataset(self.args('--prompt_augmentation'), ['0.png'])
+        prompts = []
+        for epoch in range(18):
+            dataset.set_epoch(epoch)
+            prompts.append(dataset[0]['instance_prompt'])
+        self.assertGreater(len(set(prompts)), 1)
+        dataset.set_epoch(0)
+        self.assertEqual(dataset[0]['instance_prompt'], prompts[0])
+        self.assertEqual(len(dataset.args.training_prompts), 6)
+        self.assertEqual(self.args().training_prompts, [DEFAULT_PROMPT])
+        custom = self.args('--prompt_augmentation', '--prompt', 'custom')
+        self.assertEqual(custom.training_prompts, ['custom'])
+        import json
+        captions = self.root / 'captions.json'
+        captions.write_text(json.dumps({'0.png': 'per-image instruction'}))
+        captioned = make_training_dataset(self.args('--prompt_augmentation', '--caption_json', str(captions)), ['0.png'])
+        self.assertEqual(captioned[0]['instance_prompt'], 'per-image instruction')
+
+    def test_legacy_single_prompt_resume_defaults_and_augmentation_mismatch(self):
+        from train_flux3_recolor_lora import validate_training_resume, TRAINER, STATE_VERSION
+        saved = {'instance_prompt': 'same prompt'}
+        current = dict(saved, prompt_augmentation=False, training_prompts=['same prompt'])
+        state = {'trainer': TRAINER, 'version': STATE_VERSION}
+        validate_training_resume(saved, current, state)
+        with self.assertRaisesRegex(ValueError, '恢复配置不一致'):
+            validate_training_resume(saved, dict(current, prompt_augmentation=True), state)
+
+    def test_legacy_resume_ignores_removed_cache_latents_field(self):
+        from train_flux3_recolor_lora import validate_training_resume, TRAINER, STATE_VERSION
+        saved = {'instance_prompt': 'same prompt', 'cache_latents': True}
+        current = {'instance_prompt': 'same prompt', 'prompt_augmentation': False, 'training_prompts': ['same prompt']}
+        state = {'trainer': TRAINER, 'version': STATE_VERSION}
+        validate_training_resume(saved, current, state)
 
     def test_reference_parameters_and_old_alias_conflicts(self):
         args = self.args('--train_batch_size', '2', '--lr_scheduler', 'cosine', '--lr_warmup_steps', '3',
-                         '--lora_layers', 'to_q,to_v', '--cache_latents')
+                         '--lora_layers', 'to_q,to_v')
         self.assertEqual(args.train_batch_size, 2)
         self.assertEqual(args.lr_scheduler, 'cosine')
         self.assertEqual(args.instance_data_dir, str(self.root))
@@ -36,8 +74,8 @@ class ReferenceTrainerTests(unittest.TestCase):
         self.assertEqual(policy['buckets'], [(32, 48), (48, 32)])
 
     def test_bucket_batches_keep_small_bucket_and_all_reference_shapes(self):
-        from train_flux3_recolor_lora import DreamBoothDataset, BucketBatchSampler, collate_fn
-        dataset = DreamBoothDataset(self.args('--resolution', '64'), [f'{i}.png' for i in range(5)])
+        from train_flux3_recolor_lora import BucketBatchSampler, collate_fn
+        dataset = make_training_dataset(self.args('--resolution', '64'), [f'{i}.png' for i in range(5)])
         sampler = BucketBatchSampler(dataset, 2, seed=42)
         batches = list(sampler)
         self.assertEqual(sorted(i for batch in batches for i in batch), list(range(5)))
@@ -47,37 +85,25 @@ class ReferenceTrainerTests(unittest.TestCase):
             self.assertEqual(batch['pixel_values'].shape[0], len(indices))
             self.assertEqual(len(batch['cond_pixel_values']), 3)
 
-    def test_deterministic_epoch_augmentation_and_cache_rejects_random_geometry(self):
-        from train_flux3_recolor_lora import DreamBoothDataset
+    def test_dataset_default_swatch_resize_is_recorded_in_preprocessing(self):
+        from train_flux3_recolor_lora import preprocessing_config
+        args = self.args('--resolution', '32')
+        self.assertEqual(preprocessing_config(args)['color_swatch_size'], 128)
+        dataset = make_training_dataset(args, ['0.png'])
+        self.assertEqual(tuple(dataset[0]['cond_images'][2].shape), (3, 128, 128))
+        smaller = self.args('--color_swatch_size', '32')
+        self.assertEqual(preprocessing_config(smaller)['color_swatch_size'], 32)
+
+    def test_deterministic_epoch_augmentation(self):
         args = self.args('--use_aspect_ratio_buckets', '--aspect_ratio_buckets', '32x48,48x32', '--random_flip')
-        dataset = DreamBoothDataset(args, ['0.png', '1.png'])
+        dataset = make_training_dataset(args, ['0.png', '1.png'])
         import torch
         torch.testing.assert_close(dataset[0]['instance_images'], dataset[0]['cond_images'][0], rtol=0, atol=0)
         first = dataset[0]['instance_images'].clone()
         dataset.set_epoch(3)
         dataset.set_epoch(0)
         torch.testing.assert_close(first, dataset[0]['instance_images'], rtol=0, atol=0)
-        with self.assertRaises(SystemExit):
-            self.args('--cache_latents', '--random_flip')
-
-    def test_latent_cache_is_keyed_by_identity_and_contains_all_references(self):
-        from train_flux3_recolor_lora import cache_latents, cached_latents_for_batch
-        from flux3_recolor.modeling import encode_latents
-        from diffusers import AutoencoderKLFlux2
-        from train_flux3_recolor_lora import DreamBoothDataset, collate_fn
-        import torch
-        torch.set_num_threads(1)
-        vae = AutoencoderKLFlux2(block_out_channels=(8, 8, 8, 8), latent_channels=2,
-                                norm_num_groups=4, layers_per_block=1, mid_block_add_attention=False).eval()
-        dataset = DreamBoothDataset(self.args('--resolution', '32', '--center_crop', '--cache_latents'), ['0.png', '1.png'])
-        cache = cache_latents(dataset, vae, 'cpu')
-        batch = collate_fn([dataset[1], dataset[0]])
-        target, refs = cached_latents_for_batch(cache, batch['sample_ids'], 'cpu', torch.float32)
-        expected = encode_latents(vae, batch['pixel_values'])
-        torch.testing.assert_close(target, expected)
-        self.assertEqual(len(refs), 3)
-        for i in range(3):
-            torch.testing.assert_close(refs[i], encode_latents(vae, batch['cond_pixel_values'][i]))
+        self.assertTrue(self.args('--random_flip').random_flip)
 
     def test_checkpoint_retention_only_selects_owned_completed_directories(self):
         from train_flux3_recolor_lora import checkpoints_to_remove
@@ -94,12 +120,11 @@ class ReferenceTrainerTests(unittest.TestCase):
         self.assertEqual([p.name for p in checkpoints_to_remove(self.root, limit=2)], ['checkpoint-1'])
 
     def test_auto_buckets_match_reference_ladder(self):
-        from train_flux3_recolor_lora import DreamBoothDataset
         from diffusers.training_utils import generate_aspect_ratio_buckets, find_nearest_bucket
-        dataset = DreamBoothDataset(self.args('--resolution', '64', '--use_aspect_ratio_buckets', '--center_crop'), ['0.png'])
+        dataset = make_training_dataset(self.args('--resolution', '64', '--use_aspect_ratio_buckets', '--center_crop'), ['0.png'])
         options = generate_aspect_ratio_buckets(64)
         height, width = options[find_nearest_bucket(96, 64, options)]
-        self.assertEqual(dataset.shapes[0][0], (width, height))
+        self.assertEqual(dataset.buckets[dataset.bucket_idx[0]], (height, width))
 
     def test_explicit_missing_tracker_is_not_silently_ignored(self):
         from train_flux3_recolor_lora import require_trackers

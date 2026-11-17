@@ -1,18 +1,40 @@
 # 项目架构地图
 
-更新日期：2026-11-11。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
+更新日期：2026-11-16。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
+
+## 独立 Qwen 换色 demo
+
+- [demo_qwen_recolor_pipeline.py](../demo_qwen_recolor_pipeline.py)参考官方Qwen-Image-Edit-2511 Quick Start，直接调用QwenImageEditPlusPipeline；从本地../../hf_cache/Qwen-Image-Edit-2511加载BF16，输入原图A/涂灰图/主颜色B，prompt不注入目标颜色名/RGB/色号。默认40步、true_cfg_scale4、guidance_scale1、negative_prompt为空格、CPU Generator seed43，输出qwen_recolor_result.png。
+- 当前默认组件CPU offload（GPU1空闲80GB实测）；文件顶部use_sequential_cpu_offload可切换逐层offload；不加载LoRA、不调用FLUX训练/精度recipe或mask合成。独立试验入口，不改变现有训练/Studio。
 
 ## 独立 FLUX.3 换色训练
 
+- [离线路径数据集构建](../build_flux3_recolor_dataset.py)：HF Dataset.from_generator分别构建子集，concatenate阶段控制比例，再按source_id（完整文件名主干）拆分。仅存Value(string)绝对路径、目标height/width、condition_sizes及身份/prompt，无direction、Image特性或图片bytes。仅读图片头/EXIF，PNG跳过IDAT取晚EXIF；宽高对应转正后尺寸。默认输出datasets/recolor_paths；NFS清理临时cache前释放Dataset mmap引用并gc。训练入口prepare_path_dataset在输出目录检查后/模型加载前由main_process_action主进程直接import调用，通过dataset_cache.py缓存到输入目录上一级datasets/recolor_cache/SHA256并跨run复用；传入当前prompt/captions/source_groups。hash包含构建版本/文件stat/有效构建配置，排除训练与worker参数；FileLock串行同key写入，临时构建后原子发布，并记录cache_config.json。训练现直接读取缓存train/validation；Dataset只用元数据建立buckets/bucket_idx，__getitem__才读路径并同步几何。validation统一记录按固定位置取样，不按子集扩展；日志只有总loss。
+
+- [可学习任务embedding对照](../train_flux3_recolor_text_encoder.py)复用原训练循环，opt-in train_text_encoder；text_encoder.py提供独立Transformers TextEncoderConfig/TextEncoderModel，config.length控制token长度，FP32[1,L,H]从prompt初始化（默认L为实际编码窗口），forward返回BaseModelOutput。与Transformer分别prepare、共同accumulate和clip，LoRA与encoder统一learning_rate/scale_lr（encoder保留零weight decay），输出保留图传入Transformer，不挂子模块/不改forward。验证pipeline引用训练中的text_encoder，共用validation.pipeline_text_embeddings读取并detach正向，CFG负向保留冻结空文本。标准text_encoder/config.json+model.safetensors与LoRA独立保存，hook原位恢复参数及双模型optimizer；text_encoder_format拒绝旧内嵌训练状态，仅支持新text_encoder目录格式，不再提供旧tensor兼容读取。单卡/DDP支持、FSDP拒绝，caption/随机prompt/dropout/验证文本覆盖拒绝。详见[实验说明](../FLUX3_TEXT_ENCODER.zh-CN.md)。
+
+- 数学/预处理核对、真实数据检查及验证边界见[训练核查](FLUX3_TRAINING_AUDIT.zh-CN.md)；`tests/test_flux3_math_audit.py` 提供独立解析loss/梯度与官方pipeline差分检查。loss严格拒绝预测/目标形状不一致，防止静默广播。
+- [无梯度对照入口](../compare_flux3_training_pipeline.py)复用实际训练helper，与官方ModularPipeline同noisy latent/sigma比较并分开报告布局/精度/autocast影响；见[对照说明](FLUX3_PIPELINE_COMPARE.zh-CN.md)。真实GPU已发现当前BF16 VAE/训练autocast与用户官方FP32 VAE/无外层autocast不数值等价，现已新增版本化精度方案统一生产入口；不能把旧CPU受控布局测试解读为真实路径等价。
+- [数值复核](../analyze_flux3_numeric_precision.py)重放保存的输入、分离条件与AMP、对照FP32算术和最终舍入。真实GPU结果支持数值路径敏感性，不能把不allclose直接视为代码遗漏、必须修改训练或印花根因；FP32是算术参考而非质量真值，详见对照说明。
+- [逐层定位](../trace_flux3_tensor_path.py)已将同输入AMP差异定位到Transformer首个txt_mode_blocks.0.norm LayerNorm和VAE encoder/decoder首个GroupNorm；临时统一整个归一化类的AMP策略后阶段输出逐位一致，六组Transformer均差0。源头是入口间归一化输出dtype与VAE精度策略不统一，非归一化公式遗漏；历史曾通过自定义norm固定精度，当前已按用户要求删除recipe/norm替换；现在仅固定模型级Transformer autocast、原始FP32 VAE和调用处autocast关闭。历史逐位等价结果不作为当前GPU验收。细节/边界见对照说明及迭代交接。
 - [训练/数据检查入口](../train_flux3_recolor_lora.py) 和 [推理入口](../infer_flux3_recolor_lora.py) 独立于下述数据构建/Studio 路径，详见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不改本地 Diffusers 示例，不自动下载模型。
-- `flux3_recolor/data.py` 负责严格配对/完整像素指纹/来源分组拆分、默认等比面积与16px网格策略，以及与推理共享的参考比例梯级/显式桶几何。根训练脚本的 `DreamBoothDataset/collate_fn/BucketBatchSampler` 支持多batch/repeats/workers、按epoch与sample身份确定的同步场景增强；色块独立，无颜色增强。采样键包含全部三参考尺寸，DDP按完整batch补齐进程步数，尾小桶保留。
-- 根 `train_flux3_recolor_lora.py` 是唯一训练实现，贴近参考DreamBooth结构；旧 `flux3_recolor/training.py` 仅转发。原生Accelerate prepare/accumulate、AdamW/Prodigy、LR/warmup、PEFT自定义目标、时间采样/weighting、tracker、offload/cache均有实际入口。缓存按样本身份存目标及三条件，禁止随机几何组合；固定prompt预编码，自定义caption在线编码并匹配dropout窗口。
+- `data.index_dataset`仅在构建/cache指纹层收集配对，根训练入口不再扫描/配对/拆分。cache format v2按各子集实际使用的文件收集stat，保留单个子集中独立有效的记录，不取跨子集交集。
+- 根DreamBoothDataset继承torch Dataset，接受HF路径记录；metadata纯几何分桶（H,W），保留原面积/16px网格和参考比例桶。Sampler继承BatchSampler，预先分组索引，保留尾桶与DDP整batch补齐。失败限次替换仅同bucket/repeat，返回实际ID和prompt；色块独立nearest resize。
+- 训练仅使用统一样本和loss，不存direction字段/方向mask/分方向统计。构建方向仍作为缓存输入；新训练身份为sample_id+repeat。配置dataset_format=recolor_paths_v1，dataset_path指向共享cache，split保存样本ID。新旧数据管线checkpoint不可直接互恢复。
+- `data.read_path_sample`供训练/验证共用，按路径load_rgb/EXIF转正，异分辨率场景先resize至目标画布，然后共享crop/flip；generate_validation按记录输出数字目录及来源manifest。独立验证推理也加载相同cache，可按新dataset_root重定位路径；旧adapter仍可显式三图推理，旧load_validation_sample仅供独立诊断。
+
+- training_logging.TrainingLogger负责tqdm优化器步进和logging_steps（默认10）的区间loss：本地GPU累积loss分子/样本计数，只有日志点及训练最后一步跨rank归约和读取标量、写tracker/history；均值按实际样本数加权。进度从checkpoint步数恢复，FP16跳步不推进，finally关闭。日志窗口不持久化；finite loss逐microbatch检查保留，checkpoint/验证独立。
+- 根 `train_flux3_recolor_lora.py` 是唯一训练实现，贴近参考DreamBooth结构；旧 `flux3_recolor/training.py` 仅转发。原生Accelerate prepare/accumulate、AdamW/Prodigy、LR/warmup、PEFT自定义目标、时间采样/weighting、tracker和offload均有实际入口。VAE统一在线编码：modeling.encode_recolor_latents沿batch维合并目标/涂灰/源图，一次编码后拆回，色块单独编码（每microbatch两次），复用encode_latents的FP32/mode/BN/patchify；不再提供latent缓存或相关几何限制；路径Dataset hash缓存和固定prompt预编码保留，自定义caption按当前batch在线编码，dropout空文本匹配当前窗口；使用accelerator.unwrap_model(transformer).config检查维度，避免DDP包装访问错误。固定prompt和变体保留预编码。
 - `modeling.py` 保留三参考L=-1/-2/-3、VAE BN/patchify、flow matching、标准adapter及alpha metadata。普通DDP状态仅含LoRA/optimizer/LR/scaler/每rank RNG与epoch/batch位置；FSDP1使用原生完整/分片状态（含基础模型），另导出LoRA。新状态version=2拒绝旧手动累积checkpoint，恢复要求相同world_size/关键配置，非constant调度不能改变horizon。只清理有本入口标识且步数匹配的完成checkpoint。
+- 当前固定精度：load_training_components/load_components直接from_pretrained加载FP32 VAE，所有权重/内部模块/forward保持原生；encode_latents仅对调用局部关闭autocast。precision.py仅set_transformer_autocast和pipeline_forward（临时旁路Accelerate输出FP32转换并恢复），训练/验证/推理的Transformer前向共用上下文，pipeline外层不启用AMP。删除precision_recipe参数/版本分支、自定义norm、VAE标记；latent BN和FP32 loss保留，噪声/标签跟随latent dtype，无重复强制target.float。
+- 单卡/DDP验证缓存原生pipeline并共享训练Transformer对象，不复制权重；scheduler deepcopy。验证临时恢复Accelerate包装前forward以避免输出强制FP32影响采样，finally恢复训练forward/train mode和RNG。FSDP主rank仍需汇集LoRA并加载副本，不能单rank直接调用训练分片模型。
+- component_io.py统一checkpoint/最终导出的组件保存：transformer/仅标准Diffusers LoRA+adapter metadata，训练的text_encoder/完整save_pretrained，冻结vae/Qwen不导出；model_config.json记录base_model及组件来源，weights_layout=components_v1拒绝旧目录恢复。inference.load_recolor_pipeline消费manifest定位基础模型（可覆盖路径）、校验签名并加载LoRA/custom encoder，返回原生pipeline及recolor_config/recolor_embeddings；generate_sample可默认使用这些文本条件，CLI共用该加载路径。FSDP内部恢复仍使用原生Accelerate状态。
 - `inference.py` 使用本地 FLUX.3 ModularPipeline，移除 prompt upsampler 与内部文本编码块，传入按训练设置预编码的正/负文本；复用三图预处理，输出生成图及对照。基础权重限定非蒸馏 `flow_map=False`，要求完整 Diffusers 格式。
 - `config.py` 支持普通模型目录、具体snapshot和带refs/main的HF缓存根目录；按 `modular_model_index.json` 解析tokenizer/processor子目录，无元数据时兼容独立tokenizer或text_encoder内tokenizer_config。官方base的processor实际在text_encoder；不能硬要求tokenizer目录。权重索引会校验分片存在性，缓存/权重始终只读。
 - processor直接从解析后的组件路径加载，避免Transformers5.5.4用BFL根config做Mistral tokenizer启发判断；不要给标准Qwen regex盲加Mistral修补。已核对base snapshot的Qwen使用共享输入embedding/lm_head权重，权重文件不单列lm_head不是缺片。
-- 训练默认TensorBoard、每100个优化步4张固定留出验证；`log_validation`使用真实global_step和稳定validation/generated、validation/comparison样本标签，最终为test阶段，验证后flush事件以便训练中浏览。PNG按step目录保留，所有rank同步后继续训练；report_to=none只写盘，num_validation_images=0关闭验证。
+- 训练默认TensorBoard，每100个优化步验证4张固定样本（合并validation记录均匀选取，总共4张），按数字子目录保存。validation.ValidationRuns以step/配置/选中sample_id/seed/推理步数在本进程内去重，成功才记完成；log_validation先统一判定再进入FSDP收集与主进程广播，恢复进程重新验证。tracker图片记录集中validation.log_validation_images；validation_output先写同级临时目录，生成成功后替换该步旧目录；独立推理保持非空输出保护。tracker使用稳定validation/generated、validation/comparison标签及global_step，实际执行final才记test；验证后flush，所有rank同步后继续。report_to=none只写盘，num_validation_images=0关闭验证。
 - 单卡Accelerate可能返回无index的torch.device('cuda')；CUDA RNG隔离和量化device_map用cuda_device_index回退到torch.cuda.current_device，不能把None传给fork_rng。同一步checkpoint先于验证提交，避免首次验证失败时丢失该保存步的训练状态。
+- 新训练第三条件色块在共享data预处理以NEAREST独立resize到默认128×128（--color_swatch_size），保留RGB且不改原文件；policy记录color_swatch_size，验证/推理复用，训练在线按当前预处理编码。旧推理policy缺该字段时继续原生尺寸；新128预处理不能直接resume旧32配置。
 - FSDP1要求use_orig_params=true与统一FP32 Transformer/LoRA master，裁剪向Accelerate传完整参数列表以计算全局norm；可选text encoder FSDP。FSDP只支持普通AdamW，无量化/FP8/8bit/Prodigy组合；bitsandbytes量化只支持单GPU。上述GPU路径与真实显存/质量均未验收，不从CPU小模型结果推断成功。
 
 ## 1. 两条使用路径
@@ -99,6 +121,7 @@
 - CLI 用选定解释器运行入口并传 `--input-manifest` 和 `--output-dir`；其他参数见 [cli.py](../object_inpainting/cli.py)。
 - [测试指南](../tests/README.md) 提供 unittest / pytest 命令。在本目录的文档命令为：`PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v`。解释器路径需核实，不能假定环境已装好。
 - 单类测试收窄 `-p`；浏览器测试依赖 Playwright Chromium，可通过 `STUDIO_TEST_URL` 指向服务。模型节点测试使用替代输出，不自动证明真实 GPU 推理或图像质量。
+- Studio FLUX 默认优先加载项目相对 `../../hf_cache/FLUX.2-klein-base-9B` 普通模型目录，目录不存在时回退 Hub 模型 ID 的离线缓存查找；`OBJECT_INPAINTING_FLUX_MODEL_DIR` 可显式覆盖，缓存根为 `../../hf_cache`。
 - Studio、SAM2、SAM3 的依赖分别见 [基础依赖](../object_inpainting_studio/requirements.txt)、[SAM2 依赖](../object_inpainting_studio/requirements-sam2.txt)、[SAM3 依赖](../object_inpainting_studio/requirements-sam3.txt)。模型目录、设备、缓存等先检查对应节点实现及启动脚本；不要默认下载大模型。
 
 上述命令来自源码/现有文档核对，本次笔记整理没有启动服务、运行测试或验证本机模型环境。

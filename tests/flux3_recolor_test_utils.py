@@ -39,8 +39,22 @@ def make_dataset(root, count=7):
     from PIL import Image
     from flux3_recolor import CONDITION_FOLDERS, TARGET_FOLDER
     root = Path(root)
-    for folder in (TARGET_FOLDER, *CONDITION_FOLDERS):
+    for folder in (TARGET_FOLDER, *CONDITION_FOLDERS, '主颜色B'):
         (root / folder).mkdir(parents=True)
         for i in range(count):
             Image.new('RGB', (32, 32), (i * 25, 32, 80)).save(root / folder / f'{i}.png')
     return root
+
+
+def make_training_dataset(args, names):
+    """Prepare metadata fixtures explicitly, then call the real lazy Dataset."""
+    from datasets import Dataset
+    from build_flux3_recolor_dataset import generate_samples
+    from flux3_recolor.config import read_json
+    from train_flux3_recolor_lora import DreamBoothDataset
+    captions = read_json(args.caption_json) if args.caption_json else None
+    rows = []
+    for index, direction in enumerate(args.training_directions):
+        rows.extend(generate_samples(args.instance_data_dir, direction, names, index,
+                                     prompt=args.instance_prompt, captions=captions))
+    return DreamBoothDataset(args, Dataset.from_list(rows))

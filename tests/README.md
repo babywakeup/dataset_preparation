@@ -4,11 +4,25 @@
 
 在项目根目录运行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" CUDA_VISIBLE_DEVICES='' ../.venv/bin/python -m unittest test_flux3_recolor_data test_flux3_recolor_training test_flux3_recolor_inference test_flux3_reference_trainer test_flux3_reference_training -v`。
 
-五份测试覆盖文件名配对/解码/EXIF/同步预处理/来源分组/检查CLI；真实小型FLUX.3+VAE的三参考前反向、基础冻结、LoRA alpha保存与重载；参考式入口的别名冲突、自动/显式分桶、多batch/小桶保留、缓存身份、caption/dropout、LR/warmup/epoch、workers、TensorBoard、Prodigy、checkpoint限额，以及完整本地随机FLUX.3/VAE/Qwen/tokenizer训练/验证/恢复/推理。恢复与连续训练的adapter/RNG精确对照；非constant horizon变化及旧状态被拒绝。FSDP相关CPU测试检查包装前FP32 master及完整参数裁剪接口，不代表真实FSDP运行。
+五份测试覆盖文件名配对/解码/EXIF/同步预处理/来源分组/训练CLI参数校验；真实小型FLUX.3+VAE的三参考前反向、基础冻结、LoRA alpha保存与重载；参考式入口的别名冲突、自动/显式分桶、多batch/小桶保留、缓存身份、caption/dropout、LR/warmup/epoch、workers、TensorBoard、Prodigy、checkpoint限额，以及完整本地随机FLUX.3/VAE/Qwen/tokenizer训练/验证/恢复/推理。恢复与连续训练的adapter/RNG精确对照；非constant horizon变化及旧状态被拒绝。FSDP相关CPU测试检查包装前FP32 master及完整参数裁剪接口，不代表真实FSDP运行。
+
+色块resize回归覆盖默认128×128、NEAREST保留纯色RGB/原对象不变、独立于场景面积预算、普通/分桶路径、旧policy原生32，以及实际小模型训练配置和验证/推理PNG的128尺寸；原始数据文件不改写。颜色质量是否改善需另做真实训练对照，不能由尺寸测试推断。
+
+数学核查另运行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_math_audit -q`：独立解析sigma/velocity/loss/梯度，官方RGB/VAE/文本处理对照，FP32/BF16归一化与解码逆变换，同噪声下训练/推理输入比较，零LoRA增量和预测形状拒绝。累计缩放回归为 `test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_accumulation_matches_full_batch_gradient_including_short_tail`。范围与限制见[训练核查](../docs/FLUX3_TRAINING_AUDIT.zh-CN.md)。
+
+双向数据回归运行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_bidirectional test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_bidirectional_training_resume_validation_and_directional_inference -q`。覆盖不同A/B像素与色块的目标互换、统一记录身份、合并后来源组隔离、B色块完整性/纯色/指纹、旧单向恢复、逐样本loss、双向连续/恢复参数精确对照、统一TensorBoard图像、路径记录推理及源文件名为generated.png的目录/文件边界。旧单向测试显式使用 `--training_directions b_to_a`，默认新训练为两个方向。
+
+无梯度对照工具回归运行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_pipeline_compare -q`。从本地随机小模型仓库走实际训练helper与ModularPipeline加载/原生编码/单步预测，无LoRA/optimizer/backward；检查真实差异报告、同输入重放、loss复算及state.latents维度。不要求原始路径必须allclose，不使用VAE布局修改hook掩盖差异。真实GPU运行方式与精度边界见[对照说明](../docs/FLUX3_PIPELINE_COMPARE.zh-CN.md)。
+
+同一工具测试也覆盖analyze_flux3_numeric_precision.py的CPU烟测：保存的前向输入实际重放、AMP/条件四格、FP32重复及无LoRA/grad。GPU重算只在显式授权GPU1时进行；FP32参考和最终舍入基线不作为模型质量真值或误差上界。
+
+逐层诊断回归：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_layer_trace -q`。3项涵盖首个子层分歧、临时norm forward还原、真实小模型encoder/Transformer/decoder及大张量指纹整数索引（避免FP32 linspace在2^24以上越界）。真实GPU因果控制见outputs/flux3_tensor_path_trace；仅临时改变归一化autocast策略，不能据此声称某一个层单独解释所有图像质量问题。
 
 本地模型布局回归另运行 `PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_local_model -v`：覆盖HF缓存refs/main解析、官方processor位于text_encoder、metadata安全路径及索引缺分片拒绝。不下载或加载基础权重。
 
 两进程CPU DDP单独运行：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/tests" CUDA_VISIBLE_DEVICES='' RUN_FLUX3_DDP_TESTS=1 ../.venv/bin/python -m unittest test_flux3_reference_distributed -v`。使用torchrun启动真实Accelerate/DDP，检查两rank参数同步、样本分片、验证后继续训练、epoch中途checkpoint与尾累积恢复；连续与恢复的最终adapter逐位对照。默认不自动运行此长测试。DataLoader worker和Gloo需要本机socket/IPC；受限沙箱中可能拒绝，须在允许这些能力的环境运行，不能将权限失败记为代码通过。
+
+当前DDP验收显式启用b_to_a与a_to_b，覆盖双向记录的rank分片、统计归并、两方向验证和恢复。真实GPU多卡/FSDP仍不由此证明。
 
 需要支持FLUX.3的本地Diffusers、torch、PEFT、Accelerate；TensorBoard测试需要tensorboard，Prodigy依赖缺失时单独跳过。具体环境及功能对应表见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不下载权重，不证明真实FLUX.3的GPU显存或换色质量。
 
@@ -136,3 +150,37 @@ node --test tests/test_node_editing.js
 - 前端：`node --test tests/test_port_names.js tests/test_node_editing.js`，共 29 项；新增 8 项调用真实 app 函数，覆盖任意数量端口、命名不改连线、删项不重编号、不复用 ID、空列表、运行锁 / 控件解锁、结果 / loop 计划失效、工作流往返、删除上游动态连线及组名断开回退。
 - 浏览器：[动态保存用例](test_object_inpainting_studio_browser.py) 包含添加 8 项、删项后增加新编号、命名、上传保存、下载 / 导入和继续增项。需要 Playwright Chromium 系统依赖；最小 DOM 测试不等于该端到端用例通过。
 - 2026-11-07 实际验证：全部非浏览器 Python 187 项、前端 29 项通过；动态浏览器用例因缺少 `libnspr4.so` 在启动阶段失败（0 项执行）。不加载真实模型，不证明真实模型质量。
+
+
+固定精度回归：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_precision -q`。覆盖FP32 VAE与预训练原始权重逐元素一致、模块类型/forward未改、外层AMP编码隔离、原生norm、BF16 pipeline VAE编码/解码FP32、Transformer一致autocast/FP32 LoRA梯度、共享pipeline和临时恢复Accelerate包装；不代表真实GPU数值/质量已经验收。
+
+
+独立原始pipeline入口：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_pipeline_standalone -q`，本地随机小模型实际检查原生prompt路径与官方预编码/卸载文本编码器路径，均无LoRA。
+
+
+可学习任务embedding：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_text_encoder -q`。RUN_FLUX3_DDP_TESTS=1启用两rank CPU验收（需Gloo/socket）；RUN_FLUX3_CUDA_TESTS=1且仅CUDA_VISIBLE_DEVICES=1可启用随机小模型BF16训练/实时验证。覆盖共享参数梯度、model.dtype不受FP32任务参数影响、正负条件分离、保存恢复和独立推理；不能据此声称真实换色质量改善。
+
+
+简化 Dataset：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_simple_dataset -q`。覆盖无新增参数、只扫描配对文件、不完整配对过滤、坏图有限重试/真实身份、程序错误传播，以及小尺寸过滤和repeats不浪费重试槽。随机小模型测试不代表真实换色质量。
+
+
+路径数据集构建：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_build_recolor_dataset -q`。5项测试覆盖只存路径/独立尺寸、禁止像素解码时仍能构建、PNG晚EXIF方向、拼接比例/来源组隔离、缺配对/坏图片头分别过滤、拒绝覆盖及NFS临时缓存mmap释放。不加载模型。
+
+
+训练自动构建调用：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_training_dataset_build test_build_recolor_dataset -q`，8项检查main在模型加载前真实调用构建、已有产物复用、caption与来源分组传递、配对不完整时保留原训练分组覆盖规则及路径格式。另复跑reference_training的缓存连续/恢复精确对照与TensorBoard实时验证两项，均使用CPU随机小模型。
+
+
+Dataset hash缓存：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_dataset_cache test_flux3_training_dataset_build test_build_recolor_dataset -q`。13项覆盖跨输出目录/训练参数复用、不读取图片头的命中、有效配置/文件mtime改变key、并发只构建一次、失败不发布并可重试，以及既有构建/分组行为。缓存源码独立于训练和构建函数。
+
+
+缓存消费阶段：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_cached_consumption test_flux3_reference_training -q`。覆盖初始化禁止Image.open、main缓存命中后无扫描/拆分、统一bucket与loss、同步随机几何、验证路径/均匀选样和独立推理、空caption回退、连续/恢复一致。DataLoader workers需本地IPC，DDP按前述RUN_FLUX3_DDP_TESTS显式启用。latent缓存已删除；VAE场景批量编码已接入。
+
+VAE批量编码专项：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_vae_batching -q`。随机小模型验证每microbatch两次encode、目标/灰/源/色块顺序、非平凡BN归一化、外部BF16 autocast下FP32保持、相同噪声/时间步的loss和非零LoRA梯度等价（允许batch卷积浮点差异）。不证明真实GPU吞吐或峰值显存改善。
+
+验证去重专项：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_validation_runs -q`。覆盖同step去重、prompt/样本/seed/步数变化、新进程重新出图、失败重试、旧目录成功替换及输入目录保护。reference_training覆盖恢复时已有验证目录、相同final省略、不同final prompt保留；DDP覆盖去重后多rank同步。
+
+独立text encoder：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_text_encoder -q`。覆盖Transformers格式往返、跨Transformer反传、模型独立/forward未修改、训练更新及恢复/验证/推理。`RUN_FLUX3_DDP_TESTS=1`显式启用TextEncoderDistributedTests，检查两个独立模型的rank同步和连续/恢复权重一致。
+
+分组件导出：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_component_io -q`，检查LoRA位于transformer/、可训练模型位于text_encoder/及标准from_pretrained、冻结组件无目录、manifest基础权重来源。reference_training/text_encoder覆盖统一加载、checkpoint恢复；DDP测试覆盖主进程保存广播及双模型参数恢复。
+
+日志与进度：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_training_logging test_flux3_reference_training -q`。覆盖日志点才归约、样本加权loss、最后尾段、logging_steps 1/2训练权重一致、tqdm优化器步数和恢复起点，以及恢复时调整日志间隔。
