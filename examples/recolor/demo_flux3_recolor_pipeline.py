@@ -5,6 +5,11 @@ import secrets
 import shutil
 from pathlib import Path
 
+# 支持从项目根目录直接执行此子目录脚本。
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import torch
 from PIL import Image, ImageOps
 from diffusers import ModularPipeline, Flux2KleinPipeline
@@ -15,6 +20,8 @@ from object_inpainting.nodes.flux_random_recolor import choose_recolor, recover_
 seed = -1  # -1 每次随机；复跑时填下面 run_config.json 记录的 actual_seed。
 num_inference_steps = 8
 guidance_scale = 4.0
+result_dir = Path('outputs/recolor_demo_results')
+result_dir.mkdir(parents=True, exist_ok=True)
 actual_seed = secrets.randbelow(2**32) if seed == -1 else seed
 
 target = load_image('./test/原图A/00019_00.png')
@@ -45,8 +52,8 @@ prompt = (
 output_dir = Path('outputs/flux_workflow_aligned_demo') / str(actual_seed)
 output_dir.mkdir(parents=True, exist_ok=False)
 for name in ('flux3_recolor_result.png', 'flux2_recolor_result.png'):
-    if Path(name).is_file():
-        shutil.copy2(name, output_dir / ('previous_' + name))
+    if (result_dir / name).is_file():
+        shutil.copy2(result_dir / name, output_dir / ('previous_' + name))
 for i, image in enumerate(images, 1):
     image.save(output_dir / f'condition_{i}.png')
 binary_mask.save(output_dir / 'mask.png')
@@ -87,7 +94,7 @@ image = pipe(
     output='images',
 )[0]
 image = image.crop((0, 0, width, height)).convert('RGB')
-image.save('flux3_recolor_result.png')
+image.save(result_dir / 'flux3_recolor_result.png')
 image.save(output_dir / 'flux3_raw.png')
 Image.composite(image, target, binary_mask).save(output_dir / 'flux3_composited.png')
 metadata['completed'].append('flux3')
@@ -112,7 +119,7 @@ image = pipe(
     output_type='pil',
 ).images[0]
 image = image.crop((0, 0, width, height)).convert('RGB')
-image.save('flux2_recolor_result.png')
+image.save(result_dir / 'flux2_recolor_result.png')
 image.save(output_dir / 'flux2_raw.png')
 Image.composite(image, target, binary_mask).save(output_dir / 'flux2_composited.png')
 metadata['completed'].append('flux2')

@@ -5,8 +5,9 @@
 ## 项目入口
 
 - **CLI 数据集生成**：[启动文件](build_object_inpainting_dataset.py) → [cli.main](object_inpainting/cli.py) → [pipeline.build_dataset](object_inpainting/pipeline.py)。启动文件只是薄入口，实际逻辑在业务模块中。
-- **Studio**：[启动脚本](run_object_inpainting_studio.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
-- **FLUX.3 换色 LoRA**：[训练/数据检查](train_flux3_recolor_lora.py)、[三图推理](infer_flux3_recolor_lora.py)、[中文说明](FLUX3_RECOLOR.zh-CN.md)。模型需手动下载；真实权重训练尚未验证。
+- **Studio**：[启动脚本](studio_object_inpainting.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
+- **FLUX.3 换色 LoRA**：[训练入口](train_flux3_recolor_lora.py)、[text encoder 训练脚本](train_flux3_recolor_text_encoder.sh)、[三图推理](infer_flux3_recolor.py)、[推理启动脚本](infer_flux3_recolor.sh)、[中文说明](docs/FLUX3_RECOLOR.zh-CN.md)。模型需手动下载；真实权重训练尚未验证。
+- **换色 Gradio**：[启动脚本](gradio_flux3_recolor.sh)、[交互入口](gradio_flux3_recolor.py)，加载训练权重进行交互推理。
 - **使用与依赖**：[Studio 说明](object_inpainting_studio/README.md)、[中文使用指南](object_inpainting_studio/USAGE.zh-CN.md)。
 - **测试**：[测试指南](tests/README.md) 提供运行命令、导入路径和浏览器测试要求。模型替代输出测试不能证明真实模型质量。
 
@@ -64,3 +65,5 @@
 - 明确区分“已验证 / 未执行 / 待确认”；历史测试通过不代表当前版本通过。
 - 不记录密钥、完整日志、机器专属绝对路径；用项目相对路径和必要的环境说明。
 - 需要跨机器或团队共享时，将笔记纳入版本控制；仅存在本机或聊天中的内容不等于已共享。
+
+根目录保留正式运行入口；训练说明放在 `docs/`，工作流配置放在 `configs/`，示例放在 `examples/recolor/`，诊断工具放在 `tools/flux3/`，测试放在 `tests/`。

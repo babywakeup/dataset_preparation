@@ -712,6 +712,23 @@ const liveSnapshot = (id, iteration, accepted = false) => ({
   },
 });
 
+test("ordinary batch previews show the input number and completion without an acceptance verdict", () => {
+  const ui = controller();
+  const score = canvasCard(ui, 'score');
+  ui.run(`delete state.workflow.conditional_loop;
+    state.activeJobId = 'batch-job';
+    state.activeJobRevision = state.previewRevision;
+    batch.job = {id: 'batch-job', status: 'running', visualization_revision: 1,
+      loop_previews: {batch: {kind: 'batch', loop_id: 'batch', iteration: 2, accepted: false,
+        outputs: {score: {value: {kind: 'scalar', value: 0.5}}}}}};
+    applyJobVisualization()`);
+  assert.equal(score.querySelector('.preview-state').textContent, '第 2 张输入 · 节点输出');
+  ui.run(`batch.job.status = 'completed';
+    batch.job.results = [{preview: batch.job.loop_previews.batch.outputs}];
+    applyJobVisualization()`);
+  assert.equal(score.querySelector('.preview-state').textContent, '本次运行 · 节点输出');
+});
+
 test("each running poll renders its round immediately, replaces rather than appends, then renders final preview", async () => {
   const ui = controller(), id = ui.complete(), other = ui.complete('alt');
   const gen = canvasCard(ui, 'gen'), score = canvasCard(ui, 'score');

@@ -9,6 +9,11 @@ import json
 import math
 from pathlib import Path
 
+# 支持从项目根目录直接执行此子目录脚本。
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from PIL import Image, ImageOps
 
 DEFAULT_PROMPT = (

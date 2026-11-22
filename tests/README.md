@@ -14,7 +14,7 @@
 
 无梯度对照工具回归运行 `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_pipeline_compare -q`。从本地随机小模型仓库走实际训练helper与ModularPipeline加载/原生编码/单步预测，无LoRA/optimizer/backward；检查真实差异报告、同输入重放、loss复算及state.latents维度。不要求原始路径必须allclose，不使用VAE布局修改hook掩盖差异。真实GPU运行方式与精度边界见[对照说明](../docs/FLUX3_PIPELINE_COMPARE.zh-CN.md)。
 
-同一工具测试也覆盖analyze_flux3_numeric_precision.py的CPU烟测：保存的前向输入实际重放、AMP/条件四格、FP32重复及无LoRA/grad。GPU重算只在显式授权GPU1时进行；FP32参考和最终舍入基线不作为模型质量真值或误差上界。
+同一工具测试也覆盖tools/flux3/analyze_flux3_numeric_precision.py的CPU烟测：保存的前向输入实际重放、AMP/条件四格、FP32重复及无LoRA/grad。GPU重算只在显式授权GPU1时进行；FP32参考和最终舍入基线不作为模型质量真值或误差上界。
 
 逐层诊断回归：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_layer_trace -q`。3项涵盖首个子层分歧、临时norm forward还原、真实小模型encoder/Transformer/decoder及大张量指纹整数索引（避免FP32 linspace在2^24以上越界）。真实GPU因果控制见outputs/flux3_tensor_path_trace；仅临时改变归一化autocast策略，不能据此声称某一个层单独解释所有图像质量问题。
 
@@ -24,13 +24,19 @@
 
 当前DDP验收显式启用b_to_a与a_to_b，覆盖双向记录的rank分片、统计归并、两方向验证和恢复。真实GPU多卡/FSDP仍不由此证明。
 
-需要支持FLUX.3的本地Diffusers、torch、PEFT、Accelerate；TensorBoard测试需要tensorboard，Prodigy依赖缺失时单独跳过。具体环境及功能对应表见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不下载权重，不证明真实FLUX.3的GPU显存或换色质量。
+需要支持FLUX.3的本地Diffusers、torch、PEFT、Accelerate；TensorBoard测试需要tensorboard，Prodigy依赖缺失时单独跳过。具体环境及功能对应表见[换色训练说明](../docs/FLUX3_RECOLOR.zh-CN.md)。不下载权重，不证明真实FLUX.3的GPU显存或换色质量。
 
 实时图像回归 `test_flux3_reference_training.ReferenceTrainingIntegrationTests.test_tensorboard_validation_images_update_during_training_at_real_steps` 在训练验证返回后、训练结束关闭writer前读取实际event文件，检查同一生成图/五列对照tag在step1和2递增，图像尺寸有效，证明训练过程中即可查看。不是只在end_training之后检查落盘文件。
 
 单卡CUDA回归单独运行：`CUDA_VISIBLE_DEVICES=1 RUN_FLUX3_CUDA_TESTS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_cuda_validation -v`。仅在显式启用时暴露一张授权GPU，用随机小型BF16模型训练两步、每步验证并读取TensorBoard；检查无显式索引的cuda设备、CUDA RNG隔离、验证后继续训练和检查点。未加载真实用户权重。CPU回归 `test_checkpoint_is_committed_before_validation_failure_and_can_resume` 模拟验证失败，核对完整checkpoint已在验证前提交且可恢复。
 
 本目录集中存放数据准备、节点、API 和浏览器测试。业务模块、启动脚本、工作流和示例图片仍保留在上一级目录。
+
+## Gradio 换色界面
+
+`CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_gradio -v` 检查笔画 alpha 转固定灰色、原图不变、多层合并、空画布/擦除、HEX/RGB/RGBA 自选颜色及生成时读取最新编辑状态。
+
+另设 `RUN_GRADIO_BROWSER_TESTS=1` 启用真实 Playwright Chromium 测试：临时本地服务中上传单张原图、拖动画笔、打开取色器输入色值，核对无损 PNG 预览像素并点击生成。需安装 Gradio、Playwright 及 Chromium；模型加载和生成使用替代输出，不加载 GPU 权重，不证明真实换色质量。
 
 ## 从 Diffusers 仓库根目录运行
 
@@ -184,3 +190,5 @@ VAE批量编码专项：`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTE
 分组件导出：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_component_io -q`，检查LoRA位于transformer/、可训练模型位于text_encoder/及标准from_pretrained、冻结组件无目录、manifest基础权重来源。reference_training/text_encoder覆盖统一加载、checkpoint恢复；DDP测试覆盖主进程保存广播及双模型参数恢复。
 
 日志与进度：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_training_logging test_flux3_reference_training -q`。覆盖日志点才归约、样本加权loss、最后尾段、logging_steps 1/2训练权重一致、tqdm优化器步数和恢复起点，以及恢复时调整日志间隔。
+
+权重初始化：`OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' PYTHONPATH=.:tests ../.venv/bin/python -m unittest test_flux3_initialization -q`。检查首次loss前LoRA/text权重相等、结构自动继承、step/optimizer重置、新数据新LR、来源目录保护、冲突拒绝、删来源后新阶段resume，以及FSDP验证工厂的rank/alpha pattern和RSLoRA缩放。`RUN_FLUX3_DDP_TESTS=1`可启用两rank init_from 更新验收。

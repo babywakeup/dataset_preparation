@@ -168,13 +168,15 @@ class FluxRandomRecolorNode(Node):
             "Edit image 1, the original photograph. Image 2 is the same photograph with only the editable "
             "clothing region covered in uniform gray. The region replaced by gray compared with image 1 "
             "marks where to recolor; all other regions must stay unchanged, including naturally gray objects. "
-            "Image 3 is the desired color swatch. "
-            f"Recolor only the marked clothing region to {color_name}, matching image 3. "
-            "Use image 1, not the gray fill in image 2, to preserve all original clothing details. "
-            "Preserve the exact person's identity, pose, garment silhouette, seams, buttons, prints, logos, "
-            "fabric weave, texture, folds, shadows, highlights, camera framing, and background. "
-            "Change fabric color only, not material or geometry. Do not add objects, text, mask markings, "
-            "or the swatch to the output. Return only the edited photograph."
+            "Image 3 is the target color reference. "
+            f"Perform color transfer on the marked clothing region in image 1: shift its color/dominant tone to {color_name} (matching image 3). "
+            "Strictly preserve the original fabric surface characteristics: if the original fabric has patterns, stripes, checks, or multi-color contrasts, "
+            "keep them intact with their relative spatial structure without flattening them into a solid color; "
+            "conversely, if the original fabric is smooth, flat, or fine-textured, keep it completely smooth and clean "
+            "without adding any unsolicited weaves, coarse textures, or noise. "
+            "Use image 1, not the gray fill in image 2, to retain the exact garment silhouette, seams, buttons, "
+            "prints, logos, folds, shadows, highlights, person's identity, pose, and background. "
+            "Do not add objects, text, mask markings, or the color swatch to the output. Return only the edited photograph."
         )
         width, height = target.size
         padding = (0, 0, (-width) % 16, (-height) % 16)

@@ -114,7 +114,7 @@
 在服务器上、Diffusers 仓库根目录执行：
 
 ```bash
-bash examples/dataset_preparation/run_object_inpainting_studio.sh
+bash examples/dataset_preparation/studio_object_inpainting.sh
 ```
 
 默认地址是 <http://127.0.0.1:7860>。保持服务终端运行；在该终端按 `Ctrl+C` 会停止服务。
@@ -128,7 +128,7 @@ bash examples/dataset_preparation/run_object_inpainting_studio.sh
 可通过 `--port` 修改监听端口。只有确实需要从其他机器直接访问时才修改 `--host`：
 
 ```bash
-bash examples/dataset_preparation/run_object_inpainting_studio.sh --host 0.0.0.0 --port 7860
+bash examples/dataset_preparation/studio_object_inpainting.sh --host 0.0.0.0 --port 7860
 ```
 
 服务可访问服务器文件、执行模型并写入文件，没有登录保护。不要直接开放到公网；优先使用 SSH / VS Code 端口转发，并只分享给可信用户。

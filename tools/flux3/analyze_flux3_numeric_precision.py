@@ -3,9 +3,14 @@ import argparse
 from contextlib import nullcontext
 from pathlib import Path
 
+# 支持从项目根目录直接执行此子目录脚本。
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import torch
 
-from compare_flux3_training_pipeline import autocast_context, tensor_difference
+from tools.flux3.compare_flux3_training_pipeline import autocast_context, tensor_difference
 from flux3_recolor.config import prepare_output, read_json, validate_local_model, write_json
 
 

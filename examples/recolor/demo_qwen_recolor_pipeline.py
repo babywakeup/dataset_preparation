@@ -3,9 +3,14 @@
 参考 https://huggingface.co/Qwen/Qwen-Image-Edit-2511 的 Quick Start。
 目标颜色只由第三张色块图提供，不在 prompt 中写颜色名、RGB 或色号。
 """
+from pathlib import Path
+
 import torch
 from PIL import Image, ImageOps
 from diffusers import QwenImageEditPlusPipeline
+
+result_dir = Path('outputs/recolor_demo_results')
+result_dir.mkdir(parents=True, exist_ok=True)
 
 model_path = '../../hf_cache/Qwen-Image-Edit-2511'
 
@@ -62,5 +67,5 @@ inputs = {
 }
 with torch.inference_mode():
     output = pipeline(**inputs)
-    output.images[0].save('qwen_recolor_result.png')
-print('Saved: qwen_recolor_result.png')
+    output.images[0].save(result_dir / 'qwen_recolor_result.png')
+print(f'Saved: {result_dir / "qwen_recolor_result.png"}')

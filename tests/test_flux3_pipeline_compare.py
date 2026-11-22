@@ -8,7 +8,7 @@ class PipelineCompareTests(unittest.TestCase):
         import torch
         import json
         from flux3_recolor_test_utils import make_tiny_repository, make_dataset
-        from compare_flux3_training_pipeline import main
+        from tools.flux3.compare_flux3_training_pipeline import main
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -45,7 +45,7 @@ class PipelineCompareTests(unittest.TestCase):
                                  case['one_step_latent_difference']['right']['shape'])
             self.assertNotEqual(report['cases'][0]['sigma'], report['cases'][1]['sigma'])
             self.assertTrue(all(value['exact_equal'] for value in report['rgb_preprocessing'].values()))
-            from analyze_flux3_numeric_precision import main as numeric_main
+            from tools.flux3.analyze_flux3_numeric_precision import main as numeric_main
             numeric = numeric_main(['--pretrained_model_name_or_path', str(model), '--report_root', str(root / 'report'),
                                     '--output_dir', str(root / 'numeric'), '--device', 'cpu', '--compute_dtype', 'fp32'])
             for case in numeric['cases']:
@@ -56,7 +56,7 @@ class PipelineCompareTests(unittest.TestCase):
 
     def test_difference_report_does_not_hide_shape_or_value_mismatches(self):
         import torch
-        from compare_flux3_training_pipeline import tensor_difference
+        from tools.flux3.compare_flux3_training_pipeline import tensor_difference
         self.assertFalse(tensor_difference(torch.ones(1, 2), torch.ones(2, 1), 1e-5, 1e-4)['allclose'])
         result = tensor_difference(torch.zeros(2), torch.ones(2), 1e-5, 1e-4)
         self.assertFalse(result['allclose'])

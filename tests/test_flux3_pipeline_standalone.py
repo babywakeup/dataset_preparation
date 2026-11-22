@@ -7,7 +7,7 @@ from pathlib import Path
 class StandalonePipelineTests(unittest.TestCase):
     def test_raw_pipeline_and_optional_text_offload_generate_without_lora(self):
         from flux3_recolor_test_utils import make_tiny_repository, make_dataset
-        from test_flux3_recolor_pipeline import main
+        from tools.flux3.test_flux3_recolor_pipeline import main
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             model, data = make_tiny_repository(root / 'model'), make_dataset(root / 'data')

@@ -702,13 +702,18 @@ function applyJobVisualization() {
   state.jobVisualizationKey = key;
   const updates = {};
   Object.values(job.loop_previews || {}).forEach(snapshot => {
+    const caption = snapshot.kind === "batch"
+      ? `第 ${snapshot.iteration} 张输入 · 节点输出`
+      : `循环第 ${snapshot.iteration} 次 · ${snapshot.accepted ? "通过" : "未通过"}`;
     Object.entries(snapshot.outputs || {}).forEach(([id, outputs]) => {
-      updates[id] = { outputs, caption: `循环第 ${snapshot.iteration} 次 · ${snapshot.accepted ? "通过" : "未通过"}` };
+      updates[id] = { outputs, caption };
     });
   });
   const result = job.results?.at(-1);
   Object.entries(result?.preview || {}).forEach(([id, outputs]) => {
-    updates[id] = { outputs, caption: result.accepted ? "本次运行 · 达标结果" : "本次运行 · 未达标末轮" };
+    const caption = typeof result.accepted !== "boolean" ? "本次运行 · 节点输出"
+      : result.accepted ? "本次运行 · 达标结果" : "本次运行 · 未达标末轮";
+    updates[id] = { outputs, caption };
   });
   Object.entries(updates).forEach(([id, { outputs, caption }]) => {
     if (!state.workflow?.nodes[id] || state.activeJobId !== job.id || state.activeJobRevision !== state.previewRevision) return;

@@ -195,8 +195,9 @@ class BatchJobs:
                                   **run_conditional(conditional, context, cancel, progress, initial)}
                         if "preview" in result:
                             if hasattr(graph, "batch_terminals"):
-                                progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
-                                          "accepted": result.get("accepted", False), "outputs": result["preview"]}})
+                                progress({"loop_preview": {"kind": "batch", "loop_id": "batch",
+                                          "iteration": index + 1, "accepted": result.get("accepted", False),
+                                          "outputs": result["preview"]}})
                             result["preview"] = serialize(result["preview"])
                     else:
                         execution = BatchExecution(graph, context, cancel, progress)
@@ -210,12 +211,12 @@ class BatchJobs:
                             with self.lock:
                                 job["current_node"] = node_id
                             execution.get_node(node_id)
-                            progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
+                            progress({"loop_preview": {"kind": "batch", "loop_id": "batch", "iteration": index + 1,
                                       "accepted": node_id == target_id,
                                       "outputs": {node_id: execution.cache[node_id]}}})
                         outputs = finish_batch_outputs(execution, target_id)
-                        progress({"loop_preview": {"loop_id": "batch", "iteration": index + 1,
-                                  "accepted": True, "outputs": outputs["preview"]}})
+                        progress({"loop_preview": {"kind": "batch", "loop_id": "batch",
+                                  "iteration": index + 1, "accepted": True, "outputs": outputs["preview"]}})
                         result = {"source": str(path), **outputs, "preview": serialize(outputs["preview"])}
                 except GraphExecutionCancelled:
                     with self.lock:

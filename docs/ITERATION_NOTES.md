@@ -4,6 +4,48 @@
 
 ## 当前交接
 
+- 双卡从 new9/checkpoint-23000 恢复后进度条长时间停在 23000：checkpoint 每 rank 的 batch_offset=3724，旧循环先解码和预处理再丢弃。改用 Accelerate 在分片 batch sampler 层跳过，并保留原 epoch 内 batch 编号。CPU 模拟双 rank 验证每 rank 剩 1095 batch，首批对应正确且只读取当前批和预取批；语法与 diff 检查通过。未执行真实双卡续训。下一步未指定。
+
+- 用户明确要单卡完整 resume。只读核对了 checkpoint 游标与 Accelerate load_state：new9/22900 为 2 rank，batch_offset 是每 rank 的已读 batch 数。跨卡数恢复需要按全局 batch 位置换算游标，保留 optimizer/scheduler 和 global_step，并明确 rank 0 的 RNG 迁移策略；当前训练入口尚未实现。未启动训练。下一步待确认迁移方案。
+
+- Resume 报 distributed_type 不一致：checkpoint 保存 MULTI_GPU、2 进程，工作区 shell 仍是单卡。已将 train_flux3_recolor_text_encoder.sh 更新为显式双卡 DDP，从 new9/22900 恢复。错误现在会显示 checkpoint 与当前进程的分布式配置。shell 与 Python 语法检查、git diff --check 通过；当前环境 nvidia-smi 无法连接驱动，未执行实际续训。下一步未指定。
+
+- 用户确认需要完整 resume。已核对 new9 的 checkpoint-22900 和 checkpoint-23000 训练配置一致，均为双卡、512、LR 1e-6、AtoB 调度 21 个 epoch。沿用每 100 步保存时应从 23000 恢复，避免重复保存已有目录；若明确回到 22900，可临时设为每 300 步保存，下一次保存为 23100。仅核对本地 checkpoint 与保存逻辑，未启动训练。下一步未指定。
+
+- 续训排查：new9/checkpoint-22900 保存为 512 分辨率、world_size=2，含 Transformer LoRA 和自定义 text encoder。用户的单卡命令目标为新目录 new10，应以 --init_from 继承两部分权重并从 step 0 开始；完整 resume 要求输出目录为 checkpoint 的父目录且训练配置匹配。仅核对本地配置和代码，未启动训练。下一步未指定。
+
+- 2026-11-21 / 双卡续训在Sampler初始化时报“训练DataLoader为空”：从日志确认缓存数据已构建9638条train rows、两个方向各4819，NCCL初始化完成，失败早于模型加载。根因是direction_mix._counts_per_bucket只把空bucket append到grouped，非空bucket漏append，导致batch list为空。修复为每个bucket都记录方向池。用现有test2 HF cache做无GPU复现诊断，修复后生成9638 batches，实际AtoB=4819/9638=50%；py_compile/git diff --check通过。无需重建cache；原失败发生在模型加载/训练前，不会有本次训练checkpoint。重跑双卡命令待用户执行。
+
+- 2026-11-21 / 用户更新续训配置：train_flux3_recolor_text_encoder.sh中的new7阶段命令改为CUDA_VISIBLE_DEVICES=0,1、accelerate双进程，max_train_steps=100000；其他checkpoint、test2及输出路径保持。bash -n与git diff --check通过；未启动训练。
+
+- 2026-11-21 / 用户要求把从flux3_task_embeddingnew6/checkpoint-1500加载、使用test2续训的accelerate命令加入train_flux3_recolor_text_encoder.sh。该命令已在工作区，现整理为多行并加说明；发现init_from来源checkpoint位于new6父目录，输出目录重叠会被保护逻辑拒绝，因此新阶段输出改为flux3_task_embeddingnew7。保留注释中的初训命令。bash -n与git diff --check通过；未启动训练。
+
+- 2026-11-20 / 用户要求将方向混合sampler拆到专门目录并按epoch改比例：新增flux3_recolor/samplers/{bucket.py,direction_mix.py}，原BucketBatchSampler迁出但仍从trainer导入兼容；ScheduledMixBucketBatchSampler按尺寸桶分配AtoB/BtoA样本数，epoch内保持总数，有放回补足不足方向，确定性seed+epoch，给Accelerate单次分发全局batch。DreamBoothDataset由sample_id数字子集前缀和training_directions解析direction_ids。双向默认AtoB从0.5线性降到0.25；支持atob_ratio_start/end和独立mix_schedule_epochs，恢复沿用保存的schedule时长，旧双向checkpoint缺参数时按旧1:1解释；单向沿用普通sampler。取样异常替换限制在同bucket/repeat/方向，避免改变调度比例；每epoch打印请求/实际比例。更新sampler README、换色说明和架构地图。语法编译、训练入口--help、git diff --check通过；按当前开发约束未新增或运行测试，未用GPU。任务完成，下一步未指定。
+
+
+- 2026-11-18 / Studio 普通批处理预览文案：核对工作流 (14) 无条件循环。批处理任务复用逐轮预览通道，原先把文件序号和临时状态显示为循环轮次和验收结果。为批处理快照标注类型，实时显示输入序号，普通批处理末尾显示节点输出；条件循环保留验收状态。专项前端回归先失败后通过，4 个相关前端文件及直接调用 BatchJobs 的两图保存验证通过；FastAPI TestClient 用例等待超时，色卡测试另有根目录旧配置路径失败。未启动 Studio 浏览器验证。下一步未指定。
+
+- 2026-11-18 / 正式入口名称统一：infer_flux3_recolor_lora.py→infer_flux3_recolor.py；demo_flux3_recolor_gradio.py→gradio_flux3_recolor.py；推理/Gradio shell改为对应同名.sh；train.sh→train_flux3_recolor_text_encoder.sh；Studio启动脚本→studio_object_inpainting.sh。现有build/train Python名称保留，训练命令参数不变。同步当前源码/测试/使用文档，历史计划与交接保留旧名；未更改暂存区。验证：Gradio 7项（6通过、浏览器opt-in跳过1项）、两个shell实际--help、4个shell bash -n、入口语法/导航链接/旧名残留检查与git diff --check通过；未用GPU/启动服务。任务完成，下一步未指定。
+
+- 2026-11-18 / 新增可执行run_flux3_gradio.sh、run_flux3_infer.sh：切换项目根目录，默认GPU1/现有venv/checkpoint-600，支持CUDA_VISIBLE_DEVICES/PYTHON_BIN/MODEL_DIR环境覆盖与命令行透传；推理默认单组三图、bf16、28步、seed42，OUTPUT_DIR可改，Gradio监听127.0.0.1:7860。README与训练说明补用法。bash语法、两个真实Python入口--help、从其他目录启动/含空格路径/GPU与参数透传检查及git diff --check通过；未加载大模型、未启动服务。任务完成，下一步未指定。
+
+- 2026-11-18 / 根目录进一步精简为正式运行入口：已训练pipeline demo迁至examples/recolor并补直接运行导入路径；两份FLUX训练说明迁至docs，make_dataset.json迁至configs。根目录保留数据生成/训练/正式推理/Gradio/Studio的py和sh，以及README/AGENTS/隐藏仓库元数据。同步测试导入、文档链接与命令，README注明目录分工；保持用户已有工作流删除与暂存区不变。--help、配置JSON和入口文档链接检查、git diff --check通过；独立demo CPU集成1项通过（训练/恢复/迁移后加载checkpoint与pipeline出图），未用GPU。任务完成，下一步未指定。
+
+- 2026-11-18 / 用户要求清理根目录测试文件：4个FLUX诊断脚本迁至tools/flux3，2个早期FLUX/Qwen对照demo迁至examples/recolor，补目录README；3张根目录结果图迁至outputs/recolor_demo_results（输出目录按现有gitignore忽略），旧demo后续结果也写入该处。同步跨脚本/测试导入和使用文档；子目录脚本支持从项目根目录直接执行。保留当前训练/推理/Gradio/已训练demo入口及工作流JSON，不改已有暂存区。验证：相关3模块CPU6项通过、4个工具--help通过、6脚本语法及git diff --check通过；未用GPU。任务完成，下一步未指定。
+
+- 2026-11-17 / Gradio单图交互修复：demo_flux3_recolor_gradio.py默认单图ImageEditor上传/灰色画笔/橡皮擦，主面板ColorPicker支持自选HEX/RGB/RGBA；依据background和笔画alpha生成固定128灰图，源图保持不变，生成直接读取最新editor/color而非异步预览。保留高级三图上传，示例自动切换高级模式。实际浏览器发现change可提前提交空background，改监听upload/input/clear；默认WebP会改变色块RGB，编辑器及条件预览使用PNG。新增6项CPU回归及1项真实Chromium上传/画笔/取色/生成点击测试，7项通过；生成使用替代输出，未运行真实GPU推理或质量验收。使用说明与测试指南已更新；下一步未指定。
+
+- 2026-11-17 / 新增独立推理demo_flux3_recolor_trained_pipeline.py：--model_dir指向训练导出或checkpoint，复用load_recolor_pipeline恢复基础模型、LoRA及自定义text_encoder，打印来源，三图片按gray/source/swatch输入并沿用训练预处理；自定义encoder不传prompt/颜色名。保存generated/comparison/condition图及run_config，保护输入与非空输出。文档补checkpoint-600命令。CPU真实小模型集成1项通过，包含保存/恢复、独立脚本加载checkpoint、自定义特征与保存权重精确一致及pipeline出图；--help/语法/git diff --check通过。未使用GPU、未验证真实大模型图像质量。任务完成，下一步未指定。
+
+- 2026-11-17 / LoRA模块冲突信息：inherit_model_args在target_modules冲突时列出init_from（或resume_from_checkpoint）来源路径/保存模块、显式lora_layers，并对列表形式列出新增/缺少模块；正则形式原样显示，不做集合差。保持冲突拒绝策略。专项CPU测试先失败后通过（1项），git diff --check通过；未用GPU。任务完成，下一步未指定。
+
+- 2026-11-17 / 训练入口加载来源日志：基础 VAE/Transformer/Qwen 使用[基础权重]标记及路径、dtype；init_from 成功加载 LoRA/自定义 text_encoder 后使用[已训练权重]标记及路径，encoder另报shape；resume加载hook同样标记恢复来源。新encoder和权重新训练计数单独标记。未修改用户train.sh、未干预已启动训练；新增日志仅后续进程生效。专项CPU集成1项通过，覆盖text encoder入口首次更新前双模型精确继承、基础/训练来源日志及resume双组件恢复日志；git diff --check通过。下一步未指定。
+
+- 2026-11-17 / 用户授权--init_from并以outputs/flux3_task_embeddingnew5/checkpoint-600为例：新增initialization.inherit_model_args读取component manifest和LoRA safetensors元数据，继承完整PEFT配置/rank/alpha/dropout/实际target_modules及learned text_encoder，显式结构冲突拒绝、基础模型签名检查。CLI与resume互斥，基础模型路径可自动读取；普通新训练默认参数不变。模型在optimizer前加载同default adapter（不合并/叠加），text encoder按保存配置from_pretrained并.train，optimizer/scheduler/step/RNG/数据位置重新开始，允许新数据/学习率/步数。保护来源目录；init_from保存provenance，后续resume从自身checkpoint继承结构和完整状态，原来源可删除。FSDP验证工厂也传完整PEFT配置保留pattern/RSLoRA；未扩展旧FSDP限制。
+- 真实来源只读核对：rank32/alpha32，原8个LoRA目标，无当前用户新增的context_embedder/x_embedders.image；用户对默认模块的修改保持。text_encoder[1,240,20480] FP32从_pretrained加载与实际safetensors逐元素相等，基模签名匹配；未启动该模型GPU训练、未修改原checkpoint。文档给出stage2示例命令，计数从0开始。
+- 验证：新初始化集成RED→GREEN（首loss前LoRA/encoder精确相等、新数据新LR、step1/optimizer1、删源后resume、冲突及来源保护）；8模块CPU61项（58通过、3显式opt-in跳过），两rank普通caption/encoder恢复2项及专用init_from双模型更新1项通过。review发现FSDP代理未传完整metadata，已补齐，并以rank_pattern=3/alpha_pattern=9/RSLoRA工厂测试先RED后GREEN；复查无重要项，--help/git diff --check通过。未用GPU/未改用户train.sh，任务完成；下一步未指定。
+
+
 - 2026-11-17 / 用户授权删除precision_recipe/版本分支/custom norm，并要求VAE回到预训练原始状态：删除CLI/resume shim/apply_recipe/NativeLayerNorm/NativeGroupNorm及VAE标记。训练和独立加载都直接from_pretrained(torch_dtype=float32)加载VAE，内部模块/forward/参数不改；encode_latents仅调用处关闭autocast，pipeline验证无外层AMP，原生decode转换latent到vae.dtype。保留latent BN与FP32 loss，噪声/velocity跟随latent；删重复target.float条件。
 - precision.py精简为set_transformer_autocast与pipeline_forward（临时旁路Accelerate输出FP32转换，保留Transformer自身AMP并还原），训练/验证/推理统一计算边界，不触碰模型原生FP32保留模块。LoRA/text encoder主参数策略未改。比较工具移除recipe选项和元数据，验证工具/测试重命名verify_flux3_precision.py、test_flux3_precision.py；文档明确历史旧norm GPU数值不代表当前方案验收。旧recipe状态需新目录训练，无兼容分支。
 - 验证：专项先RED后GREEN；18模块CPU106项（104通过、2显式opt-in跳过），含原始VAE state逐元素/模块类型/forward身份、外层AMP编码隔离、BF16 CPU pipeline VAE编码和解码FP32、原生LayerNorm和非零FP32 LoRA梯度、训练恢复/验证/推理；两rank CPU DDP普通caption/独立text encoder同步保存恢复2项通过。独立只读review无重要项，语法/--help/git diff --check通过。未运行真实GPU精度/质量或性能验收，未干预已有GPU任务；修改前源码已临时备份。任务完成；下一步未指定。

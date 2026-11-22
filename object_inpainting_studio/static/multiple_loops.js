@@ -387,7 +387,7 @@ function renderMultiplePreviews() {
   const job = batch.job;
   const result = job?.results?.at(-1);
   for (const [id, snapshot] of Object.entries(job?.visualize === false ? {} : job?.loop_previews || {})) {
-    if (!multipleLoop(id) || !snapshot?.outputs) continue;
+    if (!multipleLoop(id) || !snapshot?.outputs || snapshot.kind === "batch") continue;
     multipleUI.previews.set(id, { jobId: job.id, previewOnly: Boolean(job.preview_loop_id), required: job.required_loop_ids || [], result: {
       accepted: snapshot.accepted, iterations: snapshot.iteration, preview: snapshot.outputs,
     } });

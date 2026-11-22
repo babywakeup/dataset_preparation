@@ -17,13 +17,13 @@ For folder iteration, use **↻ 逐张** on the folder node and **运行全部 �
 From the Diffusers repository root:
 
 ```bash
-bash examples/dataset_preparation/run_object_inpainting_studio.sh
+bash examples/dataset_preparation/studio_object_inpainting.sh
 ```
 
 Open http://127.0.0.1:7860 in a browser. Pass `--host` and `--port` to change the listener:
 
 ```bash
-bash examples/dataset_preparation/run_object_inpainting_studio.sh --host 0.0.0.0 --port 7860
+bash examples/dataset_preparation/studio_object_inpainting.sh --host 0.0.0.0 --port 7860
 ```
 
 ## Use

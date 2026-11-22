@@ -28,7 +28,8 @@ from pathlib import Path
 from flux3_recolor import DEFAULT_PROMPT, PROMPT_VARIANTS, subdataset_config
 from flux3_recolor.config import read_json, write_json, prepare_output, validate_local_model
 from flux3_recolor.data import load_rgb, image_tensor
-from torch.utils.data import Dataset, BatchSampler
+from torch.utils.data import Dataset
+from flux3_recolor.samplers import BucketBatchSampler, ScheduledMixBucketBatchSampler
 
 logger = logging.getLogger(__name__)
 TRAINER = 'flux3-recolor-reference'
@@ -38,7 +39,7 @@ STATE_VERSION = 2
 # ------------------------------- Arguments ---------------------------------
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description='FLUX.3 三参考图换色 LoRA（参考 DreamBooth 框架）')
-    parser.add_argument('--pretrained_model_name_or_path', required=True)
+    parser.add_argument('--pretrained_model_name_or_path', help='本地基础模型；init/resume时可从组件配置读取')
     parser.add_argument('--instance_data_dir', help='本地四目录根目录，默认 ./test')
     parser.add_argument('--dataset_root', help='instance_data_dir 兼容别名')
     parser.add_argument('--instance_prompt')
@@ -46,6 +47,12 @@ def parse_args(input_args=None):
     parser.add_argument('--prompt_augmentation', action='store_true', help='训练使用6种固定语义变体；显式prompt/caption优先')
     parser.add_argument('--training_directions', nargs='+', choices=['b_to_a', 'a_to_b'],
                         default=['b_to_a', 'a_to_b'], help='默认合并两个方向；仅旧方向用 b_to_a')
+    parser.add_argument('--atob_ratio_start', type=float, default=0.5,
+                        help='混合训练起始epoch的AtoB采样占比，默认0.5')
+    parser.add_argument('--atob_ratio_end', type=float, default=0.25,
+                        help='混合训练末尾epoch的AtoB采样占比，默认0.25')
+    parser.add_argument('--mix_schedule_epochs', type=int,
+                        help='比例变化覆盖的epoch数；默认等于首次运行计划epoch数')
     parser.add_argument('--caption_json', help='可选：完整文件名到 caption 的 JSON')
     parser.add_argument('--groups_json')
     parser.add_argument('--validation_fraction', type=float, default=0.1)
@@ -83,9 +90,9 @@ def parse_args(input_args=None):
     parser.add_argument('--prodigy_use_bias_correction', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--prodigy_safeguard_warmup', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--max_grad_norm', type=float, default=1.)
-    parser.add_argument('--rank', type=int, default=16)
-    parser.add_argument('--lora_alpha', type=float, default=16.)
-    parser.add_argument('--lora_dropout', type=float, default=0.)
+    parser.add_argument('--rank', type=int)
+    parser.add_argument('--lora_alpha', type=float)
+    parser.add_argument('--lora_dropout', type=float)
     parser.add_argument('--lora_layers', help='逗号分隔 LoRA 目标模块')
     parser.add_argument('--weighting_scheme', choices=['none', 'sigma_sqrt', 'logit_normal', 'mode', 'cosmap'], default='none')
     parser.add_argument('--logit_mean', type=float, default=0.)
@@ -105,7 +112,9 @@ def parse_args(input_args=None):
     parser.add_argument('--dataloader_num_workers', type=int, default=0)
     parser.add_argument('--checkpointing_steps', type=int, default=100)
     parser.add_argument('--checkpoints_total_limit', type=int)
-    parser.add_argument('--resume_from_checkpoint')
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument('--resume_from_checkpoint')
+    initialization.add_argument('--init_from', help='从训练导出或checkpoint仅继承权重，使用新优化器和step=0')
     parser.add_argument('--logging_steps', type=int, default=10, help='每N个优化器更新步记录区间平均loss，默认10')
     parser.add_argument('--logging_dir', default='logs')
     parser.add_argument('--report_to', default='tensorboard', help='none/tensorboard/wandb/comet_ml/all')
@@ -120,6 +129,9 @@ def parse_args(input_args=None):
     args = parser.parse_args(input_args)
     if len(set(args.training_directions)) != len(args.training_directions):
         parser.error('training_directions 不能重复')
+    for name in ('atob_ratio_start', 'atob_ratio_end'):
+        if not 0 <= getattr(args, name) <= 1:
+            parser.error(f'{name} 必须在[0,1]范围内')
     custom_prompt = args.instance_prompt is not None or args.prompt is not None
     for canonical, alias, default in [('instance_data_dir', 'dataset_root', './test'),
                                       ('instance_prompt', 'prompt', DEFAULT_PROMPT)]:
@@ -128,6 +140,20 @@ def parse_args(input_args=None):
             parser.error(f'--{canonical} 与 --{alias} 不能设置不同值')
         setattr(args, canonical, first if first is not None else second if second is not None else default)
         delattr(args, alias)
+    source = args.init_from
+    if args.resume_from_checkpoint:
+        source = resolve_training_checkpoint(args.output_dir or 'outputs/flux3_recolor', args.resume_from_checkpoint)
+        args.resume_from_checkpoint = str(source)
+    if source:
+        from flux3_recolor.initialization import inherit_model_args
+        source = inherit_model_args(args, source, resume=bool(args.resume_from_checkpoint))
+        if args.init_from:
+            args.init_from = source
+    for name, default in [('rank', 16), ('lora_alpha', 16.), ('lora_dropout', 0.)]:
+        if getattr(args, name) is None:
+            setattr(args, name, default)
+    if not args.pretrained_model_name_or_path:
+        parser.error('请提供 --pretrained_model_name_or_path，或使用 --init_from/--resume_from_checkpoint')
     args.training_prompts = (list(PROMPT_VARIANTS) if args.prompt_augmentation and not custom_prompt
                              and not args.caption_json else [args.instance_prompt])
     for name in ('resolution', 'repeats', 'train_batch_size', 'num_train_epochs', 'gradient_accumulation_steps',
@@ -141,6 +167,8 @@ def parse_args(input_args=None):
                  'lr_warmup_steps', 'dataloader_num_workers'):
         if getattr(args, name) < 0:
             parser.error(f'{name} 不能为负')
+    if args.mix_schedule_epochs is not None and args.mix_schedule_epochs < 1:
+        parser.error('mix_schedule_epochs 必须为正整数')
     for name in ('learning_rate', 'lora_alpha', 'adam_epsilon', 'max_grad_norm', 'lr_power', 'logit_std', 'lr_num_cycles'):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f'{name} 必须为有限正数')
@@ -196,7 +224,7 @@ class DreamBoothDataset(Dataset):
                 or any(not isinstance(value, str) for value in self.captions.values())
                 or not set(self.names).issubset(self.captions)):
             raise ValueError('caption_json 必须覆盖所有训练文件名且值为字符串')
-        self.buckets, base_buckets, valid = [], [], []
+        self.buckets, base_buckets, base_directions, valid = [], [], [], []
         bucket_to_idx = {}
         from flux3_recolor.data import SampleDataError
         for index, row in enumerate(records):
@@ -209,12 +237,21 @@ class DreamBoothDataset(Dataset):
                 bucket_to_idx[bucket] = len(self.buckets)
                 self.buckets.append(bucket)
             base_buckets.append(bucket_to_idx[bucket])
+            try:
+                subset_id = int(str(row['sample_id']).split(':', 1)[0])
+                if not 0 <= subset_id < len(args.training_directions):
+                    raise ValueError('子集编号越界')
+                direction = args.training_directions[subset_id]
+            except (ValueError, IndexError) as exc:
+                raise ValueError(f"无法从sample_id解析训练方向: {row['sample_id']}") from exc
+            base_directions.append(direction)
             valid.append(index)
         if not valid:
             raise ValueError('Dataset没有可用样本')
         self.records = records.select(valid)
         self.num_instance_images = len(self.records)
         self.bucket_idx = base_buckets * args.repeats
+        self.direction_ids = base_directions * args.repeats
         self.sample_ids = [f"{row['sample_id']}::repeat-{repeat}" for repeat in range(args.repeats)
                            for row in self.records]
         self.bucket_indices = [[] for _ in self.buckets]
@@ -277,6 +314,7 @@ class DreamBoothDataset(Dataset):
         repeat = index // self.num_instance_images
         candidates = list({self.sample_ids[i]: i for i in self.bucket_indices[self.bucket_idx[index]]
                            if i // self.num_instance_images == repeat
+                           and self.direction_ids[i] == self.direction_ids[index]
                            and self.sample_ids[i] != self.sample_ids[index]}.values())
         random.Random(self.args.seed + self.epoch + index).shuffle(candidates)
         for actual in candidates[:8]:
@@ -295,42 +333,6 @@ def collate_fn(examples):
             'sample_ids': [e['sample_id'] for e in examples], 'names': [e['name'] for e in examples]}
 
 
-class BucketBatchSampler(BatchSampler):
-    """Keep small bucket batches; pad whole batches to equal DDP lengths."""
-    batch_size = None
-    drop_last = False
-
-    def __init__(self, dataset, batch_size, seed=42, num_processes=1):
-        self.dataset, self.requested_batch_size = dataset, batch_size
-        self.seed, self.num_processes, self.epoch = seed, num_processes, 0
-        self.sampler = range(len(dataset))
-
-    def set_epoch(self, epoch):
-        self.epoch = epoch
-        self.dataset.set_epoch(epoch)
-
-    def batches(self):
-        rng = random.Random(self.seed + self.epoch)
-        batches = []
-        for members in self.dataset.bucket_indices:
-            indices = list(members)
-            rng.shuffle(indices)
-            batches.extend(indices[i:i + self.requested_batch_size] for i in range(0, len(indices), self.requested_batch_size))
-        rng.shuffle(batches)
-        if not batches:
-            raise ValueError('训练DataLoader为空')
-        original = list(batches)
-        while len(batches) % self.num_processes:
-            batches.append(original[(len(batches) - len(original)) % len(original)])
-        return batches
-
-    def __iter__(self):
-        return iter(self.batches())
-
-    def __len__(self):
-        return len(self.batches())
-
-
 def get_qwen3vl_prompt_embeds(*args, **kwargs):
     from flux3_recolor.modeling import get_qwen3vl_prompt_embeds as encode
     return encode(*args, **kwargs)
@@ -344,6 +346,11 @@ def validate_training_resume(saved, current, state):
     if 'training_directions' in current and 'training_directions' not in saved:
         saved['training_directions'] = ['b_to_a']
         saved['subdatasets'] = subdataset_config(['b_to_a'])
+    if len(saved.get('training_directions', [])) == 2:
+        # Before the epoch schedule, the builder balanced both directions 1:1.
+        saved.setdefault('atob_ratio_start', 0.5)
+        saved.setdefault('atob_ratio_end', 0.5)
+        saved.setdefault('mix_schedule_epochs', saved.get('num_train_epochs', 1))
     # Older checkpoints used a single prompt and have neither augmentation field.
     if 'prompt_augmentation' not in saved and 'training_prompts' not in saved:
         saved['prompt_augmentation'] = False
@@ -358,6 +365,11 @@ def validate_training_resume(saved, current, state):
         mutable |= {'max_train_steps', 'num_train_epochs'}
     for key in sorted((set(saved) | set(current)) - mutable):
         if saved.get(key) != current.get(key):
+            if key in {'distributed_type', 'world_size'}:
+                raise ValueError(
+                    f'恢复配置不一致: {key} (checkpoint={saved.get(key)!r}, 当前={current.get(key)!r})；'
+                    '请沿用 checkpoint 的分布式模式和进程数'
+                )
             raise ValueError(f'恢复配置不一致: {key}')
 
 
@@ -463,6 +475,7 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
     model_kwargs = {**kwargs, 'variant': args.variant, 'torch_dtype': dtype}
     from flux3_recolor.precision import set_transformer_autocast
     vae_kwargs = {**model_kwargs, 'torch_dtype': torch.float32}
+    accelerator.print(f'[基础权重] 加载 VAE: {args.pretrained_model_name_or_path}/vae; dtype=torch.float32')
     vae = AutoencoderKLFlux2.from_pretrained(args.pretrained_model_name_or_path, subfolder='vae', **vae_kwargs)
     validate_vae_grid(vae)
     quant = None
@@ -479,6 +492,8 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
     # FSDP1 flattens parameters before its mixed-precision casts. Frozen base and
     # FP32 LoRA must have uniform master dtype at that point (use_orig_params is insufficient).
     transformer_kwargs = {**model_kwargs, 'torch_dtype': torch.float32} if is_fsdp else model_kwargs
+    accelerator.print(f'[基础权重] 加载 Transformer: {args.pretrained_model_name_or_path}/transformer; '
+                      f'dtype={transformer_kwargs["torch_dtype"]}')
     transformer = Flux3Transformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder='transformer', **transformer_kwargs, **extra)
     set_transformer_autocast(transformer, dtype)
@@ -494,11 +509,20 @@ def load_training_components(args, accelerator, dtype, is_fsdp):
     layers = [layer.strip() for layer in args.lora_layers.split(',')] if args.lora_layers else None
     if layers is not None and any(not layer for layer in layers):
         raise ValueError('lora_layers 含空模块名')
-    add_lora(transformer, args.rank, args.lora_alpha, args.lora_dropout, target_modules=layers)
+    from peft import LoraConfig
+    adapter_config = getattr(args, '_adapter_config', None)
+    add_lora(transformer, args.rank, args.lora_alpha, args.lora_dropout, target_modules=layers,
+             adapter_config=LoraConfig(**adapter_config) if adapter_config is not None else None)
+    if args.init_from:
+        from flux3_recolor.modeling import load_adapter_state
+        load_adapter_state(transformer, Path(args.init_from) / 'transformer')
+        accelerator.print(f'[已训练权重] 已加载 Transformer LoRA: {Path(args.init_from) / "transformer"}')
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
     if not is_fsdp and not quant:
         transformer.to(accelerator.device)
+    accelerator.print(f'[基础权重] 加载 Qwen text_encoder: {args.pretrained_model_name_or_path}/text_encoder; '
+                      f'dtype={dtype}（文本编码及 CFG 空文本）')
     text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
         args.pretrained_model_name_or_path, subfolder='text_encoder', **model_kwargs)
     # Load the component directory directly: tokenizer backend config detection
@@ -616,12 +640,14 @@ def make_validation_pipeline(args, components, transformer, accelerator, dtype, 
         return pipeline
     if is_fsdp:
         from diffusers import Flux3Transformer2DModel
-        from peft import set_peft_model_state_dict
+        from peft import LoraConfig, set_peft_model_state_dict
         model = Flux3Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path,
             subfolder='transformer', torch_dtype=dtype, local_files_only=True, variant=args.variant)
         from flux3_recolor.modeling import add_lora
         layers = [x.strip() for x in args.lora_layers.split(',')] if args.lora_layers else None
-        add_lora(model, args.rank, args.lora_alpha, args.lora_dropout, target_modules=layers)
+        adapter_config = getattr(args, '_adapter_config', None)
+        add_lora(model, args.rank, args.lora_alpha, args.lora_dropout, target_modules=layers,
+                 adapter_config=LoraConfig(**adapter_config) if adapter_config is not None else None)
         set_peft_model_state_dict(model, state, adapter_name='default')
         set_transformer_autocast(model, dtype)
         model.requires_grad_(False).eval()
@@ -701,6 +727,9 @@ def main(input_args=None):
     args.output_dir = str(Path(args.output_dir or 'outputs/flux3_recolor').expanduser().resolve())
     checkpoint = (resolve_training_checkpoint(args.output_dir, args.resume_from_checkpoint)
                   if args.resume_from_checkpoint else None)
+    if checkpoint is not None and args.mix_schedule_epochs is None:
+        saved_config = read_json(checkpoint / 'recolor_config.json')
+        args.mix_schedule_epochs = saved_config.get('mix_schedule_epochs', saved_config.get('num_train_epochs', 1))
 
     import torch
     from accelerate import Accelerator, DataLoaderConfiguration
@@ -709,6 +738,9 @@ def main(input_args=None):
     from flux3_recolor.modeling import encode_recolor_latents, flow_matching_loss, text_position_ids, load_adapter_state
 
     args.pretrained_model_name_or_path, model_signature = validate_local_model(args.pretrained_model_name_or_path)
+    expected_signature = getattr(args, '_source_signature', None)
+    if expected_signature is not None and expected_signature != model_signature:
+        raise ValueError('基础模型配置与初始化权重不一致')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps, mixed_precision=args.mixed_precision,
@@ -729,7 +761,8 @@ def main(input_args=None):
         torch.backends.cuda.matmul.allow_tf32 = True
     dtype = {'no': torch.float32, 'fp16': torch.float16, 'bf16': torch.bfloat16}[args.mixed_precision]
     main_process_action(accelerator, lambda: str(prepare_output(args.output_dir,
-        protected=[args.instance_data_dir, args.pretrained_model_name_or_path], resume=checkpoint is not None)))
+        protected=[args.instance_data_dir, args.pretrained_model_name_or_path] +
+                  ([args.init_from] if args.init_from else []), resume=checkpoint is not None)))
     path_dataset = main_process_action(accelerator, lambda: prepare_path_dataset(args))
     accelerator.print(f'路径Dataset: {path_dataset}')
     from datasets import load_from_disk
@@ -740,7 +773,13 @@ def main(input_args=None):
     if not args.groups_json:
         accelerator.print('拆分按完整文件名主干；不同文件名的同源衍生图请提供 --groups_json。')
     dataset = DreamBoothDataset(args, prepared['train'])
-    batch_sampler = BucketBatchSampler(dataset, args.train_batch_size, args.seed, accelerator.num_processes)
+    if len(args.training_directions) == 2:
+        batch_sampler = ScheduledMixBucketBatchSampler(
+            dataset, args.train_batch_size, args.seed, accelerator.num_processes,
+            args.atob_ratio_start, args.atob_ratio_end,
+            total_epochs=args.mix_schedule_epochs or args.num_train_epochs)
+    else:
+        batch_sampler = BucketBatchSampler(dataset, args.train_batch_size, args.seed, accelerator.num_processes)
     generator = torch.Generator().manual_seed(args.seed)
     train_dataloader = torch.utils.data.DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn,
         num_workers=args.dataloader_num_workers, generator=generator, pin_memory=accelerator.device.type == 'cuda')
@@ -748,10 +787,18 @@ def main(input_args=None):
     updates_per_epoch = math.ceil(local_batches / args.gradient_accumulation_steps)
     args.max_train_steps = args.max_train_steps or args.num_train_epochs * updates_per_epoch
     args.num_train_epochs = math.ceil(args.max_train_steps / updates_per_epoch)
+    if isinstance(batch_sampler, ScheduledMixBucketBatchSampler):
+        if args.mix_schedule_epochs is None:
+            args.mix_schedule_epochs = args.num_train_epochs
+        batch_sampler.set_total_epochs(args.mix_schedule_epochs)
 
-    config = {key: value for key, value in vars(args).items() if key not in {
+    config = {key: value for key, value in vars(args).items() if not key.startswith('_') and key not in {
         'instance_data_dir', 'output_dir', 'pretrained_model_name_or_path', 'groups_json',
         'caption_json', 'resume_from_checkpoint', 'local_rank', 'bnb_quantization_config_path'}}
+    if len(args.training_directions) < 2:
+        config.pop('atob_ratio_start', None)
+        config.pop('atob_ratio_end', None)
+        config.pop('mix_schedule_epochs', None)
     config.update(format_version=1, trainer=TRAINER, training_state_version=STATE_VERSION,
         model_path=args.pretrained_model_name_or_path, model_config_signature=model_signature,
         split=split, world_size=accelerator.num_processes,
@@ -768,7 +815,9 @@ def main(input_args=None):
     state = {'trainer': TRAINER, 'version': STATE_VERSION, 'global_step': 0, 'epoch': 0, 'batch_offset': 0}
     if checkpoint is not None:
         state = read_json(checkpoint / 'training_state.json')
-        validate_training_resume(read_json(checkpoint / 'recolor_config.json'), config, state)
+        saved_config = read_json(checkpoint / 'recolor_config.json')
+        config['init_from'] = saved_config.get('init_from')
+        validate_training_resume(saved_config, config, state)
         if read_json(checkpoint / 'split.json') != split:
             raise ValueError('恢复时split发生变化')
         if state['global_step'] >= args.max_train_steps:
@@ -789,11 +838,24 @@ def main(input_args=None):
 
     # Fixed prompt is encoded once. Custom captions remain online so each shuffled
     # batch gets exactly its largest window, rather than a stale batch-index cache.
-    fixed_embeddings = compute_text_embeddings(args.instance_prompt) if not args.caption_json else None
     text_encoder = None
-    if args.train_text_encoder:
-        from flux3_recolor.text_encoder import TextEncoderModel
-        text_encoder = TextEncoderModel.from_features(fixed_embeddings).to(accelerator.device)
+    source = Path(args.init_from) if args.init_from else checkpoint
+    if source and args.train_text_encoder and (source / 'text_encoder').is_dir():
+        from flux3_recolor.text_encoder import TextEncoderModel, current_text_embeddings
+        text_encoder = TextEncoderModel.from_pretrained(source / 'text_encoder',
+            local_files_only=True, torch_dtype=torch.float32).to(accelerator.device).train()
+        if text_encoder.config.hidden_size != transformer.config.joint_attention_dim:
+            raise ValueError('已有text_encoder hidden_size与Transformer不一致')
+        fixed_embeddings = current_text_embeddings(text_encoder, dtype)
+        accelerator.print(f'[已训练权重] 已加载 text_encoder: {source / "text_encoder"}; shape={tuple(text_encoder.weight.shape)}')
+    else:
+        fixed_embeddings = compute_text_embeddings(args.instance_prompt) if not args.caption_json else None
+        if args.train_text_encoder:
+            from flux3_recolor.text_encoder import TextEncoderModel
+            text_encoder = TextEncoderModel.from_features(fixed_embeddings).to(accelerator.device)
+            accelerator.print('[新初始化] text_encoder 从当前 prompt 初始化')
+    if args.init_from:
+        accelerator.print('[新训练] init_from 仅继承权重：新建 optimizer/scheduler，global_step 从 0 开始')
     optimizer = create_optimizer(args, transformer, accelerator.num_processes, text_encoder)
     lr_scheduler = get_scheduler(args.lr_scheduler, optimizer=optimizer, num_warmup_steps=args.lr_warmup_steps,
                                  num_training_steps=args.max_train_steps, num_cycles=args.lr_num_cycles, power=args.lr_power)
@@ -835,9 +897,11 @@ def main(input_args=None):
             weights.clear()
         def load_model_hook(models, directory):
             load_adapter_state(accelerator.unwrap_model(transformer), Path(directory) / 'transformer')
+            accelerator.print(f'[已训练权重] 恢复 Transformer LoRA: {Path(directory) / "transformer"}')
             if args.train_text_encoder:
                 from flux3_recolor.text_encoder import load_text_encoder_into
                 load_text_encoder_into(accelerator.unwrap_model(text_encoder), directory)
+                accelerator.print(f'[已训练权重] 恢复 text_encoder: {Path(directory) / "text_encoder"}')
             models.clear()
         handles = [accelerator.register_save_state_pre_hook(save_model_hook),
                    accelerator.register_load_state_pre_hook(load_model_hook)]
@@ -875,13 +939,21 @@ def main(input_args=None):
             train_dataloader.set_epoch(epoch)
             generator.manual_seed(args.seed + epoch)
             plan = batch_sampler.batches()
+            if isinstance(batch_sampler, ScheduledMixBucketBatchSampler):
+                stats = batch_sampler.last_mix
+                accelerator.print(f"epoch={epoch + 1}/{args.num_train_epochs} "
+                                  f"AtoB={stats['atob_samples']}/{stats['total_samples']} "
+                                  f"({stats['achieved_atob_ratio']:.1%}; target="
+                                  f"{stats['requested_atob_ratio']:.1%})")
             start_offset = state['batch_offset'] if state['epoch'] == epoch else 0
+            epoch_dataloader = train_dataloader
+            if start_offset:
+                accelerator.print(f'恢复 epoch {epoch + 1}：每个进程跳过已训练的 {start_offset} 个 batch')
+                epoch_dataloader = accelerator.skip_first_batches(train_dataloader, start_offset)
             group_loss = torch.zeros((), device=accelerator.device)
             group_count = 0
             transformer.train()
-            for batch_index, batch in enumerate(train_dataloader):
-                if batch_index < start_offset:
-                    continue
+            for batch_index, batch in enumerate(epoch_dataloader, start=start_offset):
                 group_start = batch_index // args.gradient_accumulation_steps * args.gradient_accumulation_steps
                 group_end = min(group_start + args.gradient_accumulation_steps, local_batches)
                 group_samples = sum(len(indices) for indices in

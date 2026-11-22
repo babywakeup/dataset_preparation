@@ -98,6 +98,7 @@ class FolderBatchTests(unittest.TestCase):
         self.assertTrue(job["visualize"])
         self.assertEqual(set(job["loop_previews"]), {"batch"})
         snapshot = job["loop_previews"]["batch"]
+        self.assertEqual(snapshot["kind"], "batch")
         self.assertEqual((snapshot["loop_id"], snapshot["iteration"], snapshot["accepted"]), ("batch", 2, True))
         self.assertEqual(job["results"][0]["preview"], {})
         latest = job["results"][-1]

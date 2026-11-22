@@ -132,6 +132,23 @@ class TextEncoderIntegrationTests(unittest.TestCase):
                 infer(['--lora_dir', str(full), '--dataset_root', str(data), '--output_dir', str(root / 'inferred'),
                        '--device', 'cpu', '--mixed_precision', 'no', '--num_inference_steps', '1', '--limit', '1'])
             self.assertTrue((root / 'inferred/manifest.json').is_file())
+            from examples.recolor.demo_flux3_recolor_trained_pipeline import main as demo
+            from flux3_recolor import CONDITION_FOLDERS
+            name = next((data / CONDITION_FOLDERS[0]).glob('*.png')).name
+            demo_options = ['--model_dir', str(full / 'checkpoint-3'),
+                            '--output_dir', str(root / 'demo'), '--device', 'cpu',
+                            '--mixed_precision', 'no', '--num_inference_steps', '1']
+            for flag, folder in zip(('--gray_image', '--source_image', '--swatch_image'), CONDITION_FOLDERS):
+                demo_options.extend([flag, str(data / folder / name)])
+            from flux3_recolor.inference import generate_sample
+            def demo_capture(pipeline, *args, **kwargs):
+                torch.testing.assert_close(pipeline.recolor_text_encoder.weight.cpu(), expected, rtol=0, atol=0)
+                return generate_sample(pipeline, *args, **kwargs)
+            with patch('examples.recolor.demo_flux3_recolor_trained_pipeline.generate_sample', side_effect=demo_capture):
+                image = demo(demo_options)
+            self.assertEqual(image.size, (32, 32))
+            self.assertTrue((root / 'demo/generated.png').is_file())
+            self.assertTrue((root / 'demo/comparison.png').is_file())
 
     def test_invalid_prompt_modes_are_rejected(self):
         from train_flux3_recolor_lora import parse_args

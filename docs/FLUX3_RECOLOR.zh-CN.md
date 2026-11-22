@@ -1,6 +1,6 @@
 # FLUX.3 三参考图换色 LoRA
 
-独立于 Studio 与数据集构建 CLI。训练入口是 [train_flux3_recolor_lora.py](train_flux3_recolor_lora.py)，推理入口是 [infer_flux3_recolor_lora.py](infer_flux3_recolor_lora.py)。不修改 `diffusers/examples/dreambooth/` 的原示例。
+独立于 Studio 与数据集构建 CLI。训练入口是 [train_flux3_recolor_lora.py](../train_flux3_recolor_lora.py)，推理入口是 [infer_flux3_recolor.py](../infer_flux3_recolor.py)。不修改 `diffusers/examples/dreambooth/` 的原示例。
 
 训练采用固定精度：VAE直接从预训练权重以FP32加载，内部LayerNorm/GroupNorm、权重和forward均不替换；编码调用局部关闭autocast，验证/推理不对整个pipeline启用低精度autocast。Transformer按mixed_precision加载，并在自身前向使用一致的autocast上下文；模型原生保留FP32的模块遵循Diffusers默认行为。latent BN归一化和FP32 loss保留。
 
@@ -32,7 +32,9 @@
 
 仅保留旧方向用 `--training_directions b_to_a`；仅训练反向用 `--training_directions a_to_b`。
 旧单向checkpoint续训需显式选择 `b_to_a`，并保持其他配置/数据不变；不能直接把旧checkpoint切成双向。
-`training_directions` 仅用于构建选择；训练与验证读取统一记录，不再根据方向分支。sample_id区分不同记录与repeat，防止latent身份混用。
+`training_directions` 决定参与构建的子集；训练仍使用统一记录和loss，混合 sampler 仅依据 `sample_id` 的子集前缀调整取样比例。验证保持原有统一记录。sample_id区分不同记录与repeat，防止latent身份混用。
+
+双向训练使用独立的方向混合分桶 BatchSampler，保持每个 epoch 的样本总量和尺寸分桶，同时按 epoch 线性调整 AtoB 占比。默认从 50% 降至 25%；可用 `--atob_ratio_start`、`--atob_ratio_end` 覆盖。默认在本次计划的训练 epoch 内完成比例变化，也可用 `--mix_schedule_epochs` 单独设定持续时长；恢复训练时自动沿用 checkpoint 中的 schedule 时长。每个 epoch 会打印请求比例和实际采样比例；若某些尺寸桶只含一个方向，实际比例会受该桶约束。Accelerate 负责把相同的全局 batch 计划分配到各进程。单向训练继续使用普通尺寸分桶 sampler。
 合成B成为监督意味着其错误纹理也可能被学习，双向训练不保证解决新增印花问题。
 
 固定条件顺序对应 FLUX.3 的参考图位置编码 L=-1/-2/-3。目标 latent 加噪，条件 latent 不加噪；只对目标计算标准全图 flow matching velocity loss。冻结 VAE、文本编码器及基础 Transformer，仅优化 attention/FFN 的 LoRA（包括 image_cond 分支）。初版不使用 mask 或区域加权。
@@ -88,7 +90,7 @@ your-flux3-model/
 
 ## 数据准备
 
-训练入口会自动import并调用数据集构建函数，将路径与尺寸元数据保存到共享的hash缓存，然后加载模型训练；相同数据构建配置会跨训练输出目录复用。无需额外的数据检查开关，正常训练必须传入本地 `--pretrained_model_name_or_path`。
+训练入口会自动import并调用数据集构建函数，将路径与尺寸元数据保存到共享的hash缓存，然后加载模型训练；相同数据构建配置会跨训练输出目录复用。无需额外的数据检查开关，从头训练必须传入本地 `--pretrained_model_name_or_path`；init/resume可从保存的组件配置读取基础模型位置。
 
 默认按完整文件名主干分组，**不能据此确认不同文件名是否来自同一原图**。若有同源衍生样本，使用 `--groups_json groups.json`，JSON 为覆盖所有样本的“完整文件名 → 来源组 ID”映射，例如 `{"00000_00.png":"source_00000","00000_01.png":"source_00000"}`；同组不会跨训练/验证集。两个集合均必须非空。
 
@@ -211,6 +213,25 @@ image, references = generate_sample(pipe, conditions, pipe.recolor_config, seed=
 
 同一步同时触发checkpoint和验证时，先提交checkpoint，再做验证推理；验证异常也能保留该保存步的训练状态。若旧版本已在保存前退出且目录只有配置/日志/loss，没有checkpoint，则无法从loss恢复模型权重，请保留日志并使用新输出目录重跑。
 
+开始新一轮训练使用`--init_from`，与`--resume_from_checkpoint`互斥。它只继承保存的权重：读取model_config.json定位基础模型，按LoRA文件元数据恢复完整adapter配置（rank、alpha、实际目标模块及pattern等），加载同一个default adapter；来源有可训练text_encoder时自动启用并from_pretrained加载其完整配置/权重。不会合并LoRA或新增第二套adapter。显式提供不同rank/alpha/dropout/目标模块会报错。
+
+优化器、scheduler、随机种子和数据位置重新初始化，global_step从0开始；数据/学习率/训练步数可重新指定，必须使用新的输出目录。基础模型位置可用pretrained_model_name_or_path覆盖，配置签名必须一致。新运行保存init_from来源，后续从新checkpoint恢复不需要原初始化目录仍然存在。resume会从自身checkpoint读取adapter结构，恢复自己的optimizer/RNG/数据位置。
+
+以已有checkpoint-600为例（启动新一轮，不继承原600步计数）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 ../.venv/bin/accelerate launch --num_processes 1 \
+  train_flux3_recolor_lora.py \
+  --init_from ./outputs/flux3_task_embeddingnew5/checkpoint-600 \
+  --instance_data_dir ./test \
+  --output_dir ./outputs/flux3_task_embeddingnew5_stage2 \
+  --resolution 1024 --train_batch_size 1 \
+  --learning_rate 1e-5 --max_train_steps 1000 --mixed_precision bf16 \
+  --validation_inference_steps 8 --num_validation_images 4 --report_to tensorboard
+```
+
+该来源自动恢复rank=32、alpha=32及其原8个目标模块，text_encoder长度240/hidden_size=20480；不采用后续修改的默认模块集合。此命令仅为示例，不会自动执行。
+
 恢复例子：使用相同基础模型、数据、分组、caption、预处理、world_size、batch/accumulation、优化器和LR配置，附加 `--resume_from_checkpoint latest`（或当前输出目录内的完整checkpoint路径）。num_train_epochs与max_train_steps是总训练horizon，不是额外训练量。
 
 **只有constant调度允许直接增加总训练步数**；cosine/linear等改变horizon会改变轨迹，恢复时会拒绝。日志/保存频率可调整；数据或关键配置改变需要新输出目录。模型权重分片不应被原地替换，模型校验检查本地路径及配置摘要，不逐分片哈希。
@@ -258,7 +279,7 @@ CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python train_flux3_recolor_lora.py \
 ## 三图推理
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor_lora.py \
+CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor.py \
   --lora_dir ./outputs/flux3_recolor_v2 \
   --gray_image './test/经过涂灰的原图AB/00000_00.png' \
   --generated_b_image './test/生成图B/00000_00.png' \
@@ -272,7 +293,7 @@ CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor_lora.py \
 生成保存清单中的留出验证集：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor_lora.py \
+CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor.py \
   --lora_dir ./outputs/flux3_recolor_v2 --dataset_root ./test \
   --limit 4 --output_dir ./outputs/recolor_validation
 ```
@@ -281,17 +302,17 @@ CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python infer_flux3_recolor_lora.py \
 
 ## 已验证与未验证
 
-本轮34项离线CPU测试通过，另1项真实两进程CPU DDP验收通过。使用本地随机小型FLUX.3/VAE/Qwen3-VL/tokenizer，不下载权重；覆盖数据合同、三参考数学、LoRA、分桶、cache身份、caption/dropout、LR/warmup、workers、TensorBoard、Prodigy、恢复、主进程验证与标准推理。两进程检查参数同步、epoch中途恢复及尾累积；连续/恢复训练的最终adapter逐位一致。完整命令见[测试指南](tests/README.md)。本轮完整数据检查确认423组、381/42拆分。
+本轮34项离线CPU测试通过，另1项真实两进程CPU DDP验收通过。使用本地随机小型FLUX.3/VAE/Qwen3-VL/tokenizer，不下载权重；覆盖数据合同、三参考数学、LoRA、分桶、cache身份、caption/dropout、LR/warmup、workers、TensorBoard、Prodigy、恢复、主进程验证与标准推理。两进程检查参数同步、epoch中途恢复及尾累积；连续/恢复训练的最终adapter逐位一致。完整命令见[测试指南](../tests/README.md)。本轮完整数据检查确认423组、381/42拆分。
 
 用户完成2步smoke训练后，本轮已用该LoRA在GPU1/BF16下完成4张真实留出样本推理（每图28步），结果与五列对照在 `outputs/flux3_recolor_smoke_validation/`。第一张仍沿用B图颜色，不能据此宣称训练已收敛。真实基础权重加载/推理已执行，但没有启动额外训练或测峰值显存；FP16 scaler、FSDP运行、bitsandbytes/8bit Adam、FP8和完整训练质量仍需对应验收。未安装torchao或连接外部tracker。
 
 
 ## 单独测试原始 pipeline
 
-[test_flux3_recolor_pipeline.py](test_flux3_recolor_pipeline.py) 不依赖训练入口，不加载LoRA/精度补丁；默认使用官方ModularPipeline本地工厂及组件加载器，VAE FP32、其他模型按mixed_precision。关闭prompt扩写以保持输入指令不变，默认prompt不包含目标颜色名称/RGB/色号。
+[tools/flux3/test_flux3_recolor_pipeline.py](../tools/flux3/test_flux3_recolor_pipeline.py) 不依赖训练入口，不加载LoRA/精度补丁；默认使用官方ModularPipeline本地工厂及组件加载器，VAE FP32、其他模型按mixed_precision。关闭prompt扩写以保持输入指令不变，默认prompt不包含目标颜色名称/RGB/色号。
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python test_flux3_recolor_pipeline.py \
+CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python tools/flux3/test_flux3_recolor_pipeline.py \
   --pretrained_model_name_or_path ../../hf_cache/models--black-forest-labs--flux-3-image-klein-base \
   --dataset_root ./test --sample 00019_00.png --direction b_to_a \
   --offload_text_encoder --output_dir ./outputs/pipeline_test_00019
@@ -303,8 +324,22 @@ CUDA_VISIBLE_DEVICES=1 ../.venv/bin/python test_flux3_recolor_pipeline.py \
 默认 LoRA 目标现包含 Attention（to_q/to_k/to_v/to_out.0）、FFN（ff.linear_in/ff.linear_out）和参考图调制层 `early_stream_modulations.image_cond.linear`、`single_stream_modulations.image_cond.linear`。`--lora_layers` 会完整覆盖默认列表。新增默认模块用于新训练，请使用新的输出目录。旧checkpoint不能直接增加模块恢复；继续旧训练需保持原代码的目标列表及原恢复配置。
 
 
-可学习文本条件的独立对照入口为 [train_flux3_recolor_text_encoder.py](train_flux3_recolor_text_encoder.py)，使用共享任务embedding＋LoRA；原入口默认仍为固定文本。命令、保存/恢复和限制见[实验说明](FLUX3_TEXT_ENCODER.zh-CN.md)。
+可学习文本条件的独立对照入口为 [train_flux3_recolor_text_encoder.py](../train_flux3_recolor_text_encoder.py)，使用共享任务embedding＋LoRA；原入口默认仍为固定文本。命令、保存/恢复和限制见[实验说明](FLUX3_TEXT_ENCODER.zh-CN.md)。
 
+
+### Gradio 单图画笔换色
+
+[交互入口](../gradio_flux3_recolor.py) 使用已安装 Gradio 6.x：
+
+```bash
+../.venv/bin/python gradio_flux3_recolor.py \
+  --model_dir outputs/flux3_task_embeddingnew5/checkpoint-600 \
+  --server_name 127.0.0.1 --server_port 7860
+```
+
+默认“单图画笔（推荐）”：在大画布上传一张原图，点击画笔涂抹换色区域，可调笔刷大小并用橡皮擦修正；点击“目标颜色”打开取色器，可自选颜色或输入 HEX / RGB。三张条件图自动预览，无需另外上传涂灰图和色块。点击生成时重新从当前笔画及颜色构建条件，源图保持原始像素，所有有笔画 alpha 的区域统一填充 RGB(128,128,128)，目标色块为 128×128；编辑器与条件预览使用无损 PNG。
+
+已有三图时选择“三图上传（高级）”；内置三图示例会自动切换该模式。默认在生成时加载模型，不在页面打开时加载。局域网访问可显式指定 `--server_name 0.0.0.0`；该界面可选择服务器本地模型路径，应仅向可信用户开放，不默认开启公网分享。
 
 ### Dataset 读取
 
@@ -354,3 +389,26 @@ print(row["target_path"], row["height"], row["width"])
 hash输入为构建版本、输入目录、方向/目录映射、选中文件名、混合比例、划分seed/比例、prompt、caption和来源分组内容，以及源文件大小/mtime_ns。模型、LoRA rank、学习率、分辨率、repeats及worker数不影响当前路径数据集内容，不进入hash。命中只检查文件状态并加载保存的Dataset，不再执行构建或读取图片头；训练Dataset与Sampler初始化也不读取图片头。源文件若保留大小和mtime但修改内容，无法被这一轻量校验识别。
 
 每个hash使用独立文件锁，构建写入临时目录，完成Dataset与cache_config.json后原子发布；并发相同配置只构建一次，失败不会留下可命中的半成品。构建版本/具体配置/源文件状态可在cache_config.json中查看。无新增CLI参数；构建算法或schema改变时需更新CACHE_FORMAT_VERSION。
+
+### Shell 启动入口
+
+```bash
+# 启动 Gradio，默认监听 127.0.0.1:7860
+bash gradio_flux3_recolor.sh
+
+# 单组三图推理，默认样本 00019_00.png，结果写入 outputs/flux3_inference
+bash infer_flux3_recolor.sh
+```
+
+两者默认使用 GPU 1、`../.venv/bin/python` 和 `outputs/flux3_task_embeddingnew5/checkpoint-600`。
+可用环境变量覆盖，额外命令行参数直接传给对应 Python 入口：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 MODEL_DIR=./outputs/your_run/checkpoint-1000 \
+  bash gradio_flux3_recolor.sh --server_port 7861
+
+MODEL_DIR=./outputs/your_run/checkpoint-1000 OUTPUT_DIR=./outputs/inference_new \
+  bash infer_flux3_recolor.sh --num_inference_steps 40 --seed 43
+```
+
+`PYTHON_BIN` 可指定其他 Python。脚本先切换到项目根目录，图片/模型/输出的相对路径均以项目根目录为准。推理默认是涂灰图、生成图B、主颜色A；可通过 `--gray_image`、`--source_image`、`--color_image` 覆盖，输出目录须为空。

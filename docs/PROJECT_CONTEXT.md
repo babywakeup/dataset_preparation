@@ -1,26 +1,26 @@
 # 项目架构地图
 
-更新日期：2026-11-16。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
+更新日期：2026-11-20。用途：按需定位代码，不要求每轮全部读取。实现变化时同步修正。
 
 ## 独立 Qwen 换色 demo
 
-- [demo_qwen_recolor_pipeline.py](../demo_qwen_recolor_pipeline.py)参考官方Qwen-Image-Edit-2511 Quick Start，直接调用QwenImageEditPlusPipeline；从本地../../hf_cache/Qwen-Image-Edit-2511加载BF16，输入原图A/涂灰图/主颜色B，prompt不注入目标颜色名/RGB/色号。默认40步、true_cfg_scale4、guidance_scale1、negative_prompt为空格、CPU Generator seed43，输出qwen_recolor_result.png。
+- [examples/recolor/demo_qwen_recolor_pipeline.py](../examples/recolor/demo_qwen_recolor_pipeline.py)参考官方Qwen-Image-Edit-2511 Quick Start，直接调用QwenImageEditPlusPipeline；从本地../../hf_cache/Qwen-Image-Edit-2511加载BF16，输入原图A/涂灰图/主颜色B，prompt不注入目标颜色名/RGB/色号。默认40步、true_cfg_scale4、guidance_scale1、negative_prompt为空格、CPU Generator seed43，输出qwen_recolor_result.png。
 - 当前默认组件CPU offload（GPU1空闲80GB实测）；文件顶部use_sequential_cpu_offload可切换逐层offload；不加载LoRA、不调用FLUX训练/精度recipe或mask合成。独立试验入口，不改变现有训练/Studio。
 
 ## 独立 FLUX.3 换色训练
 
 - [离线路径数据集构建](../build_flux3_recolor_dataset.py)：HF Dataset.from_generator分别构建子集，concatenate阶段控制比例，再按source_id（完整文件名主干）拆分。仅存Value(string)绝对路径、目标height/width、condition_sizes及身份/prompt，无direction、Image特性或图片bytes。仅读图片头/EXIF，PNG跳过IDAT取晚EXIF；宽高对应转正后尺寸。默认输出datasets/recolor_paths；NFS清理临时cache前释放Dataset mmap引用并gc。训练入口prepare_path_dataset在输出目录检查后/模型加载前由main_process_action主进程直接import调用，通过dataset_cache.py缓存到输入目录上一级datasets/recolor_cache/SHA256并跨run复用；传入当前prompt/captions/source_groups。hash包含构建版本/文件stat/有效构建配置，排除训练与worker参数；FileLock串行同key写入，临时构建后原子发布，并记录cache_config.json。训练现直接读取缓存train/validation；Dataset只用元数据建立buckets/bucket_idx，__getitem__才读路径并同步几何。validation统一记录按固定位置取样，不按子集扩展；日志只有总loss。
 
-- [可学习任务embedding对照](../train_flux3_recolor_text_encoder.py)复用原训练循环，opt-in train_text_encoder；text_encoder.py提供独立Transformers TextEncoderConfig/TextEncoderModel，config.length控制token长度，FP32[1,L,H]从prompt初始化（默认L为实际编码窗口），forward返回BaseModelOutput。与Transformer分别prepare、共同accumulate和clip，LoRA与encoder统一learning_rate/scale_lr（encoder保留零weight decay），输出保留图传入Transformer，不挂子模块/不改forward。验证pipeline引用训练中的text_encoder，共用validation.pipeline_text_embeddings读取并detach正向，CFG负向保留冻结空文本。标准text_encoder/config.json+model.safetensors与LoRA独立保存，hook原位恢复参数及双模型optimizer；text_encoder_format拒绝旧内嵌训练状态，仅支持新text_encoder目录格式，不再提供旧tensor兼容读取。单卡/DDP支持、FSDP拒绝，caption/随机prompt/dropout/验证文本覆盖拒绝。详见[实验说明](../FLUX3_TEXT_ENCODER.zh-CN.md)。
+- [可学习任务embedding对照](../train_flux3_recolor_text_encoder.py)复用原训练循环，opt-in train_text_encoder；text_encoder.py提供独立Transformers TextEncoderConfig/TextEncoderModel，config.length控制token长度，FP32[1,L,H]从prompt初始化（默认L为实际编码窗口），forward返回BaseModelOutput。与Transformer分别prepare、共同accumulate和clip，LoRA与encoder统一learning_rate/scale_lr（encoder保留零weight decay），输出保留图传入Transformer，不挂子模块/不改forward。验证pipeline引用训练中的text_encoder，共用validation.pipeline_text_embeddings读取并detach正向，CFG负向保留冻结空文本。标准text_encoder/config.json+model.safetensors与LoRA独立保存，hook原位恢复参数及双模型optimizer；text_encoder_format拒绝旧内嵌训练状态，仅支持新text_encoder目录格式，不再提供旧tensor兼容读取。单卡/DDP支持、FSDP拒绝，caption/随机prompt/dropout/验证文本覆盖拒绝。详见[实验说明](FLUX3_TEXT_ENCODER.zh-CN.md)。
 
 - 数学/预处理核对、真实数据检查及验证边界见[训练核查](FLUX3_TRAINING_AUDIT.zh-CN.md)；`tests/test_flux3_math_audit.py` 提供独立解析loss/梯度与官方pipeline差分检查。loss严格拒绝预测/目标形状不一致，防止静默广播。
-- [无梯度对照入口](../compare_flux3_training_pipeline.py)复用实际训练helper，与官方ModularPipeline同noisy latent/sigma比较并分开报告布局/精度/autocast影响；见[对照说明](FLUX3_PIPELINE_COMPARE.zh-CN.md)。真实GPU已发现当前BF16 VAE/训练autocast与用户官方FP32 VAE/无外层autocast不数值等价，现已新增版本化精度方案统一生产入口；不能把旧CPU受控布局测试解读为真实路径等价。
-- [数值复核](../analyze_flux3_numeric_precision.py)重放保存的输入、分离条件与AMP、对照FP32算术和最终舍入。真实GPU结果支持数值路径敏感性，不能把不allclose直接视为代码遗漏、必须修改训练或印花根因；FP32是算术参考而非质量真值，详见对照说明。
-- [逐层定位](../trace_flux3_tensor_path.py)已将同输入AMP差异定位到Transformer首个txt_mode_blocks.0.norm LayerNorm和VAE encoder/decoder首个GroupNorm；临时统一整个归一化类的AMP策略后阶段输出逐位一致，六组Transformer均差0。源头是入口间归一化输出dtype与VAE精度策略不统一，非归一化公式遗漏；历史曾通过自定义norm固定精度，当前已按用户要求删除recipe/norm替换；现在仅固定模型级Transformer autocast、原始FP32 VAE和调用处autocast关闭。历史逐位等价结果不作为当前GPU验收。细节/边界见对照说明及迭代交接。
-- [训练/数据检查入口](../train_flux3_recolor_lora.py) 和 [推理入口](../infer_flux3_recolor_lora.py) 独立于下述数据构建/Studio 路径，详见[换色训练说明](../FLUX3_RECOLOR.zh-CN.md)。不改本地 Diffusers 示例，不自动下载模型。
+- [无梯度对照入口](../tools/flux3/compare_flux3_training_pipeline.py)复用实际训练helper，与官方ModularPipeline同noisy latent/sigma比较并分开报告布局/精度/autocast影响；见[对照说明](FLUX3_PIPELINE_COMPARE.zh-CN.md)。真实GPU已发现当前BF16 VAE/训练autocast与用户官方FP32 VAE/无外层autocast不数值等价，现已新增版本化精度方案统一生产入口；不能把旧CPU受控布局测试解读为真实路径等价。
+- [数值复核](../tools/flux3/analyze_flux3_numeric_precision.py)重放保存的输入、分离条件与AMP、对照FP32算术和最终舍入。真实GPU结果支持数值路径敏感性，不能把不allclose直接视为代码遗漏、必须修改训练或印花根因；FP32是算术参考而非质量真值，详见对照说明。
+- [逐层定位](../tools/flux3/trace_flux3_tensor_path.py)已将同输入AMP差异定位到Transformer首个txt_mode_blocks.0.norm LayerNorm和VAE encoder/decoder首个GroupNorm；临时统一整个归一化类的AMP策略后阶段输出逐位一致，六组Transformer均差0。源头是入口间归一化输出dtype与VAE精度策略不统一，非归一化公式遗漏；历史曾通过自定义norm固定精度，当前已按用户要求删除recipe/norm替换；现在仅固定模型级Transformer autocast、原始FP32 VAE和调用处autocast关闭。历史逐位等价结果不作为当前GPU验收。细节/边界见对照说明及迭代交接。
+- [训练/数据检查入口](../train_flux3_recolor_lora.py) 和 [推理入口](../infer_flux3_recolor.py) 独立于下述数据构建/Studio 路径，详见[换色训练说明](FLUX3_RECOLOR.zh-CN.md)。不改本地 Diffusers 示例，不自动下载模型。
 - `data.index_dataset`仅在构建/cache指纹层收集配对，根训练入口不再扫描/配对/拆分。cache format v2按各子集实际使用的文件收集stat，保留单个子集中独立有效的记录，不取跨子集交集。
-- 根DreamBoothDataset继承torch Dataset，接受HF路径记录；metadata纯几何分桶（H,W），保留原面积/16px网格和参考比例桶。Sampler继承BatchSampler，预先分组索引，保留尾桶与DDP整batch补齐。失败限次替换仅同bucket/repeat，返回实际ID和prompt；色块独立nearest resize。
-- 训练仅使用统一样本和loss，不存direction字段/方向mask/分方向统计。构建方向仍作为缓存输入；新训练身份为sample_id+repeat。配置dataset_format=recolor_paths_v1，dataset_path指向共享cache，split保存样本ID。新旧数据管线checkpoint不可直接互恢复。
+- 根DreamBoothDataset继承torch Dataset，接受HF路径记录；metadata纯几何分桶（H,W），保留原面积/16px网格和参考比例桶。`flux3_recolor/samplers/`保存普通BucketBatchSampler和ScheduledMixBucketBatchSampler；后者保留每桶样本总数，按epoch调整AtoB/BtoA数量，并补齐整batch供Accelerate分发。方向从sample_id的数字子集前缀与training_directions顺序解析，不增加图片或loss方向分支；分桶组成限制目标比例时日志记录实际比例。失败限次替换仅同bucket/repeat/方向，返回实际ID和prompt；色块独立nearest resize。
+- 双向训练默认AtoB比例从0.5线性降到0.25；`--atob_ratio_start/end`可改。采样在每个bucket内按方向抽取，维持epoch总样本量，数量不足时有放回抽样；DDP全局batch计划仅交由Accelerate分发一次。单向仍用普通BucketBatchSampler。训练loss与输入目标无方向条件，source groups仍由缓存切分隔离。新训练身份为sample_id+repeat，配置保存比例用于精确恢复。新旧数据管线checkpoint不可直接互恢复。
 - `data.read_path_sample`供训练/验证共用，按路径load_rgb/EXIF转正，异分辨率场景先resize至目标画布，然后共享crop/flip；generate_validation按记录输出数字目录及来源manifest。独立验证推理也加载相同cache，可按新dataset_root重定位路径；旧adapter仍可显式三图推理，旧load_validation_sample仅供独立诊断。
 
 - training_logging.TrainingLogger负责tqdm优化器步进和logging_steps（默认10）的区间loss：本地GPU累积loss分子/样本计数，只有日志点及训练最后一步跨rank归约和读取标量、写tracker/history；均值按实际样本数加权。进度从checkpoint步数恢复，FP16跳步不推进，finally关闭。日志窗口不持久化；finite loss逐microbatch检查保留，checkpoint/验证独立。
@@ -28,6 +28,7 @@
 - `modeling.py` 保留三参考L=-1/-2/-3、VAE BN/patchify、flow matching、标准adapter及alpha metadata。普通DDP状态仅含LoRA/optimizer/LR/scaler/每rank RNG与epoch/batch位置；FSDP1使用原生完整/分片状态（含基础模型），另导出LoRA。新状态version=2拒绝旧手动累积checkpoint，恢复要求相同world_size/关键配置，非constant调度不能改变horizon。只清理有本入口标识且步数匹配的完成checkpoint。
 - 当前固定精度：load_training_components/load_components直接from_pretrained加载FP32 VAE，所有权重/内部模块/forward保持原生；encode_latents仅对调用局部关闭autocast。precision.py仅set_transformer_autocast和pipeline_forward（临时旁路Accelerate输出FP32转换并恢复），训练/验证/推理的Transformer前向共用上下文，pipeline外层不启用AMP。删除precision_recipe参数/版本分支、自定义norm、VAE标记；latent BN和FP32 loss保留，噪声/标签跟随latent dtype，无重复强制target.float。
 - 单卡/DDP验证缓存原生pipeline并共享训练Transformer对象，不复制权重；scheduler deepcopy。验证临时恢复Accelerate包装前forward以避免输出强制FP32影响采样，finally恢复训练forward/train mode和RNG。FSDP主rank仍需汇集LoRA并加载副本，不能单rank直接调用训练分片模型。
+- initialization.inherit_model_args从组件manifest/LoRA safetensors元数据继承基模、完整PEFT配置、rank/alpha/dropout/targets，来源learned text_encoder自动启用。--init_from仅继承模型权重，optimizer/scheduler/RNG/data position/step重新开始；新目录保护来源，config保留init_from provenance。resume也读自身LoRA元数据构造结构（含pattern/RSLoRA/FSDP验证副本），从自身checkpoint加载完整状态，不依赖原init目录；LoRA与text_encoder在optimizer前初始化，原参数引用不变。用户显式结构冲突拒绝，基模签名检查；新默认LoRA目标不影响旧adapter结构。
 - component_io.py统一checkpoint/最终导出的组件保存：transformer/仅标准Diffusers LoRA+adapter metadata，训练的text_encoder/完整save_pretrained，冻结vae/Qwen不导出；model_config.json记录base_model及组件来源，weights_layout=components_v1拒绝旧目录恢复。inference.load_recolor_pipeline消费manifest定位基础模型（可覆盖路径）、校验签名并加载LoRA/custom encoder，返回原生pipeline及recolor_config/recolor_embeddings；generate_sample可默认使用这些文本条件，CLI共用该加载路径。FSDP内部恢复仍使用原生Accelerate状态。
 - `inference.py` 使用本地 FLUX.3 ModularPipeline，移除 prompt upsampler 与内部文本编码块，传入按训练设置预编码的正/负文本；复用三图预处理，输出生成图及对照。基础权重限定非蒸馏 `flow_map=False`，要求完整 Diffusers 格式。
 - `config.py` 支持普通模型目录、具体snapshot和带refs/main的HF缓存根目录；按 `modular_model_index.json` 解析tokenizer/processor子目录，无元数据时兼容独立tokenizer或text_encoder内tokenizer_config。官方base的processor实际在text_encoder；不能硬要求tokenizer目录。权重索引会校验分片存在性，缓存/权重始终只读。
@@ -42,7 +43,7 @@
 | 路径 | 入口与职责 |
 | --- | --- |
 | CLI 数据集构建 | [启动文件](../build_object_inpainting_dataset.py) 仅调用 [cli.main](../object_inpainting/cli.py)；解析 manifest、输出目录、可选 workflow，构造 `PipelineConfig` 后调用 `build_dataset` |
-| Studio 交互处理 | [启动脚本](../run_object_inpainting_studio.sh) → [模块入口](../object_inpainting_studio/__main__.py) → [FastAPI 服务](../object_inpainting_studio/server.py)；提供图编辑、预览、保存、文件夹批处理和数据集导出 |
+| Studio 交互处理 | [启动脚本](../studio_object_inpainting.sh) → [模块入口](../object_inpainting_studio/__main__.py) → [FastAPI 服务](../object_inpainting_studio/server.py)；提供图编辑、预览、保存、文件夹批处理和数据集导出 |
 
 两条路径共享节点和图执行器，但“保存当前图片 / 文件夹批处理”不等于 CLI 的完整训练数据集导出。不要把当前打开的薄入口当成主要实现。
 
@@ -117,7 +118,7 @@
 
 ## 5. 运行与验证导航
 
-- 在本目录启动 Studio：`bash run_object_inpainting_studio.sh`。脚本默认用 `../.venv/bin/python`，可通过 `OBJECT_INPAINTING_STUDIO_PYTHON` 覆盖，不要求提前激活虚拟环境；设置 `PYTHONPATH`。HF 缓存默认放在 `../../hf_cache`，允许环境变量覆盖 `HF_HOME`、`HF_HUB_CACHE`（优先于旧名 `HUGGINGFACE_HUB_CACHE`）和 `HF_XET_CACHE`，两个 Hub 变量统一指向同一目录。默认 host/port 见模块入口，不猜测当前是否已有服务。
+- 在本目录启动 Studio：`bash studio_object_inpainting.sh`。脚本默认用 `../.venv/bin/python`，可通过 `OBJECT_INPAINTING_STUDIO_PYTHON` 覆盖，不要求提前激活虚拟环境；设置 `PYTHONPATH`。HF 缓存默认放在 `../../hf_cache`，允许环境变量覆盖 `HF_HOME`、`HF_HUB_CACHE`（优先于旧名 `HUGGINGFACE_HUB_CACHE`）和 `HF_XET_CACHE`，两个 Hub 变量统一指向同一目录。默认 host/port 见模块入口，不猜测当前是否已有服务。
 - CLI 用选定解释器运行入口并传 `--input-manifest` 和 `--output-dir`；其他参数见 [cli.py](../object_inpainting/cli.py)。
 - [测试指南](../tests/README.md) 提供 unittest / pytest 命令。在本目录的文档命令为：`PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py' -v`。解释器路径需核实，不能假定环境已装好。
 - 单类测试收窄 `-p`；浏览器测试依赖 Playwright Chromium，可通过 `STUDIO_TEST_URL` 指向服务。模型节点测试使用替代输出，不自动证明真实 GPU 推理或图像质量。

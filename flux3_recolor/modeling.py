@@ -22,6 +22,8 @@ FLOW_SHIFT = 6.93
 LORA_TARGETS = [
     'to_q', 'to_k', 'to_v', 'to_out.0',
     'ff.linear_in', 'ff.linear_out',
+    'context_embedder',
+    'x_embedders.image',
     'early_stream_modulations.image_cond.linear',
     'single_stream_modulations.image_cond.linear',
 ]
@@ -97,10 +99,10 @@ def validate_vae_grid(vae):
         raise ValueError(f'当前预处理要求 token 网格 {GRID}、patch_size=(2,2)，实际网格为 {actual}')
 
 
-def add_lora(transformer, rank, alpha, dropout, target_modules=None):
+def add_lora(transformer, rank, alpha, dropout, target_modules=None, adapter_config=None):
     from peft import LoraConfig
     transformer.requires_grad_(False)
-    transformer.add_adapter(LoraConfig(
+    transformer.add_adapter(adapter_config or LoraConfig(
         r=rank, lora_alpha=alpha, lora_dropout=dropout,
         init_lora_weights='gaussian', target_modules=target_modules or LORA_TARGETS,
     ))

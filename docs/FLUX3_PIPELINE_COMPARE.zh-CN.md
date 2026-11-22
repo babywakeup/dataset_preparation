@@ -1,6 +1,6 @@
 # 无梯度训练 / 官方 Pipeline 对照
 
-入口：[compare_flux3_training_pipeline.py](../compare_flux3_training_pipeline.py)。仅加载基础模型，不加LoRA，不创建优化器、不backward、不更新参数。复用实际训练的Dataset/collate/VAE编码/文本编码/flow_matching_loss，而不是另写一套相似的loss。
+入口：[tools/flux3/compare_flux3_training_pipeline.py](../tools/flux3/compare_flux3_training_pipeline.py)。仅加载基础模型，不加LoRA，不创建优化器、不backward、不更新参数。复用实际训练的Dataset/collate/VAE编码/文本编码/flow_matching_loss，而不是另写一套相似的loss。
 
 ## 对齐的量
 
@@ -25,7 +25,7 @@
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  ../.venv/bin/python -u compare_flux3_training_pipeline.py \
+  ../.venv/bin/python -u tools/flux3/compare_flux3_training_pipeline.py \
   --pretrained_model_name_or_path ../../hf_cache/models--black-forest-labs--flux-3-image-klein-base \
   --instance_data_dir ./test --sample 00047_00.png --direction a_to_b \
   --resolution 1024 --mixed_precision bf16 --device cuda \
@@ -48,7 +48,7 @@ CUDA_VISIBLE_DEVICES=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 
 ## 浮点误差的再次计算
 
-入口：[analyze_flux3_numeric_precision.py](../analyze_flux3_numeric_precision.py)。重放上次保存的相同输入，独立改变条件tokens和AMP形成四格对照；比较同配置重复结果，再将同一份可表示权重和输入转为FP32计算（关闭TF32），并以最终一次BF16舍入作为参考。没有重新生成噪声/文本/目标，也不更新任何权重。
+入口：[tools/flux3/analyze_flux3_numeric_precision.py](../tools/flux3/analyze_flux3_numeric_precision.py)。重放上次保存的相同输入，独立改变条件tokens和AMP形成四格对照；比较同配置重复结果，再将同一份可表示权重和输入转为FP32计算（关闭TF32），并以最终一次BF16舍入作为参考。没有重新生成噪声/文本/目标，也不更新任何权重。
 
 真实GPU1六组重算：训练/官方诊断MSE相对差0.117%–0.923%，velocity相对L2差1.743%–10.777%；训练BF16+AMP与同输入FP32参考差0.775%–5.351%，官方BF16无AMP与各自FP32参考差0.797%–5.326%，两者量级相近。最终单次输出BF16舍入约0.166%。所有同配置BF16/FP32重复以及保存预测重放均逐位一致。
 
@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  ../.venv/bin/python -u analyze_flux3_numeric_precision.py \
+  ../.venv/bin/python -u tools/flux3/analyze_flux3_numeric_precision.py \
   --pretrained_model_name_or_path ../../hf_cache/models--black-forest-labs--flux-3-image-klein-base \
   --report_root ./outputs/flux3_pipeline_compare_verified \
   --output_dir ./outputs/flux3_numeric_new --device cuda --compute_dtype bf16
@@ -66,7 +66,7 @@ CUDA_VISIBLE_DEVICES=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 
 ## 定位到具体归一化子层
 
-后续按用户要求增加 [trace_flux3_tensor_path.py](../trace_flux3_tensor_path.py)，对完整相同的Transformer输入做前后事件指纹，而非只比较最终velocity。真实GPU首个分歧为 `txt_mode_blocks.0.norm`：输入完全一样，LayerNorm在AMP内输出FP32，在AMP外输出BF16，随后调制乘加也使用不同dtype。仅对全部44个LayerNorm禁用AMP、其余网络仍用AMP时，6组同输入velocity从0.845%–5.894%相对差降到逐位相等。这验证的是归一化类策略，不是只有第一个LayerNorm单独造成全部误差。
+后续按用户要求增加 [tools/flux3/trace_flux3_tensor_path.py](../tools/flux3/trace_flux3_tensor_path.py)，对完整相同的Transformer输入做前后事件指纹，而非只比较最终velocity。真实GPU首个分歧为 `txt_mode_blocks.0.norm`：输入完全一样，LayerNorm在AMP内输出FP32，在AMP外输出BF16，随后调制乘加也使用不同dtype。仅对全部44个LayerNorm禁用AMP、其余网络仍用AMP时，6组同输入velocity从0.845%–5.894%相对差降到逐位相等。这验证的是归一化类策略，不是只有第一个LayerNorm单独造成全部误差。
 
 VAE同输入独立实验：encoder首个AMP分歧为 `down_blocks.0.resnets.0.norm1` GroupNorm，decoder为 `mid_block.resnets.0.norm1` GroupNorm；对各自全部归一化模块统一策略后，encoder的2.428% latent相对差、decoder的0.2266%输出相对差均降为逐位0。decoder用固定相同latent隔离，且decoder在velocity之后，不能解释velocity误差。另一个独立不一致是原始FP32 VAE权重/输入与BF16 VAE的加载精度，首差开始于像素cast和encoder.conv_in；精度/布局一致时编码helper与官方原生编码块、解码手算与官方原生解码块均逐位相等。
 

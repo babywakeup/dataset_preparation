@@ -9,8 +9,8 @@
 
 ## 关键入口
 - CLI：[启动文件](build_object_inpainting_dataset.py) → [cli.main](object_inpainting/cli.py) → [pipeline.build_dataset](object_inpainting/pipeline.py)。
-- Studio：[启动脚本](run_object_inpainting_studio.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
-- FLUX.3 换色：[训练/数据检查](train_flux3_recolor_lora.py)、[推理](infer_flux3_recolor_lora.py)、[使用说明](FLUX3_RECOLOR.zh-CN.md)。
+- Studio：[启动脚本](studio_object_inpainting.sh)、[服务端](object_inpainting_studio/server.py)、[前端](object_inpainting_studio/static/app.js)、[循环逻辑](object_inpainting_studio/static/loop.js)。
+- FLUX.3 换色：[训练/数据检查](train_flux3_recolor_lora.py)、[推理](infer_flux3_recolor.py)、[使用说明](docs/FLUX3_RECOLOR.zh-CN.md)。
 - 测试命令和依赖说明以 [测试指南](tests/README.md) 为准；模型替代输出测试不能证明真实模型质量。
 
 ## 迭代结束时维护
