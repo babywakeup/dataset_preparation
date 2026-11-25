@@ -8,7 +8,7 @@ CUDA_VISIBLE_DEVICES=0,1 ../.venv/bin/accelerate launch \
   --mixed_precision bf16 --dynamo_backend no \
   train_flux3_recolor_text_encoder.py \
   --resume_from_checkpoint outputs/flux3_task_embeddingnew9/checkpoint-22900 \
-  --instance_data_dir ./test2 \
+  --instance_data_dir ./训练数据集 \
   --output_dir ./outputs/flux3_task_embeddingnew9 \
   --resolution 512 \
   --rank 32 --lora_alpha 32 \
