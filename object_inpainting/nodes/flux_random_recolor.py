@@ -126,7 +126,7 @@ class FluxRandomRecolorNode(Node):
     """真实调用 FLUX.2 Klein 随机修改指定衣服区域的颜色，用于反向构造 source。"""
 
     INPUT_SCHEMA = FluxRandomRecolorInputs
-    INPUT_DEFAULTS = {"seed": -1, "num_inference_steps": 28, "guidance_scale": 4.0}
+    INPUT_DEFAULTS = {"seed": -1, "num_inference_steps": 28, "guidance_scale": 4.0, "preserve_unmasked": 1}
     OUTPUT_SCHEMA = RandomRecolorOutputs
     CATEGORY = "dataset"
 
@@ -137,8 +137,9 @@ class FluxRandomRecolorNode(Node):
         seed: int = -1,
         num_inference_steps: int = 28,
         guidance_scale: float = 4.0,
+        preserve_unmasked: int = 1,
     ) -> RandomRecolorOutputs:
-        """用原图、编辑区涂灰原图和随机色块参考进行换色，强制复用 Mask 外原像素。
+        """用三张参考图换色，默认合成保留 Mask 外原像素，可关闭该后处理。
 
         Args:
             target (PIL.Image.Image): RGB 原图，作为真实训练 target，不会被修改，宽高至少 16。
@@ -147,11 +148,13 @@ class FluxRandomRecolorNode(Node):
             seed (int): -1 每次随机；0～2**32-1 固定候选颜色和推理随机种子，默认 -1。
             num_inference_steps (int): FLUX.2 Klein base 去噪步数，默认 28，必须为正整数。
             guidance_scale (float): 有限非负引导强度，默认 4.0。
+            preserve_unmasked (int): 1（默认）合成保留 Mask 外原像素；0 直接返回裁剪后的生成图。
 
         Returns:
             RandomRecolorOutputs: source 为原尺寸 RGB 换色结果；masked_source 为其编辑区涂灰图；
             mask 为从涂灰差异恢复的二值 L 图；sampled_color 为 128×128 RGB 随机色块；color_name、actual_seed、
-            generation_prompt 记录本次生成条件。不写文件，不保证 Mask 内纹理或色值严格一致。
+            generation_prompt 记录本次生成条件。不写文件，不保证 Mask 内纹理或色值严格一致；
+            关闭 preserve_unmasked 后也不保证 Mask 外与原图一致，masked_source 仍从实际 source 涂灰。
 
         Raises:
             ValueError: 输入、参数、Mask 或生成尺寸不正确，或本地模型加载/推理失败。
@@ -161,6 +164,8 @@ class FluxRandomRecolorNode(Node):
             raise ValueError("target 宽高必须至少为 16 像素。")
         if type(seed) is not int or not -1 <= seed < 2**32:
             raise ValueError("seed 必须是 -1（随机）或 0～2**32-1 的整数。")
+        if type(preserve_unmasked) is not int or preserve_unmasked not in (0, 1):
+            raise ValueError("preserve_unmasked 必须是整数 0（关闭合成）或 1（保留 Mask 外原图）。")
         actual_seed = secrets.randbelow(2**32) if seed == -1 else seed
         color_name, rgb = choose_recolor(target, binary_mask, actual_seed)
         sampled_color = Image.new("RGB", (128, 128), rgb)
@@ -196,7 +201,7 @@ class FluxRandomRecolorNode(Node):
         if generated.size != reference.size:
             raise ValueError("FLUX 生成尺寸与请求不一致，无法安全对齐 source 与 target。")
         generated = generated.crop((0, 0, width, height)).convert("RGB")
-        source = Image.composite(generated, target, binary_mask)
+        source = Image.composite(generated, target, binary_mask) if preserve_unmasked else generated
         masked_source = make_source(source, binary_mask)
         return {
             "source": source,

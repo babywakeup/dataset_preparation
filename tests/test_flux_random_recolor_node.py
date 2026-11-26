@@ -12,7 +12,7 @@ from object_inpainting.graph import NodeGraph
 from object_inpainting.nodes import flux_klein_reference, flux_random_recolor
 from object_inpainting.nodes.flux_random_recolor import FluxRandomRecolorNode, choose_recolor, recover_recolor_mask
 from object_inpainting.nodes.gray_mask import GrayMaskNode
-from object_inpainting_studio.server import app
+from object_inpainting_studio.server import app, node_catalog
 from PIL import Image
 
 
@@ -102,7 +102,8 @@ class FluxRandomRecolorTests(unittest.TestCase):
         self.assertEqual(outputs["sampled_color"].size, (128, 128))
         self.assertEqual(outputs["sampled_color"].getextrema(), tuple((v, v) for v in expected_rgb))
         self.assertIn(outputs["color_name"], call["prompt"])
-        self.assertIn("fabric weave, texture, folds", call["prompt"])
+        self.assertIn("Strictly preserve the original fabric surface characteristics", call["prompt"])
+        self.assertIn("without adding any unsolicited weaves, coarse textures, or noise", call["prompt"])
         self.assertIn("editable clothing region covered in uniform gray", call["prompt"])
         self.assertIn("Use image 1, not the gray fill in image 2", call["prompt"])
         self.assertNotIn("binary editing mask", call["prompt"])
@@ -131,6 +132,31 @@ class FluxRandomRecolorTests(unittest.TestCase):
         np.testing.assert_array_equal(masked[~active], original[~active])
         np.testing.assert_array_equal(self.target, original)
         np.testing.assert_array_equal(self.mask, original_mask)
+
+    def test_preserve_unmasked_switch_controls_only_postprocessing(self) -> None:
+        original, original_mask = np.asarray(self.target).copy(), np.asarray(self.mask).copy()
+        node = FluxRandomRecolorNode()
+        preserved = node.execute(self.target, self.mask, seed=42, preserve_unmasked=1)
+        raw = node.execute(self.target, self.mask, seed=42, preserve_unmasked=0)
+        active = np.asarray(self.edit_mask) > 0
+        np.testing.assert_array_equal(np.asarray(preserved["source"])[~active], original[~active])
+        self.assertTrue(np.all(np.asarray(raw["source"]) == (17, 201, 99)))
+        self.assertEqual(raw["source"].size, self.target.size)
+        self.assertEqual(raw["source"].mode, "RGB")
+        self.assertTrue(np.all(np.asarray(raw["masked_source"])[active] == 128))
+        np.testing.assert_array_equal(np.asarray(raw["masked_source"])[~active],
+                                      np.asarray(raw["source"])[~active])
+        np.testing.assert_array_equal(raw["mask"], preserved["mask"])
+        np.testing.assert_array_equal(raw["sampled_color"], preserved["sampled_color"])
+        self.assertEqual(self.calls[0]["prompt"], self.calls[1]["prompt"])
+        np.testing.assert_array_equal(self.target, original)
+        np.testing.assert_array_equal(self.mask, original_mask)
+
+    def test_invalid_preserve_unmasked_never_starts_inference(self) -> None:
+        for value in (-1, 2, True, False, 1.0, "0", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "preserve_unmasked"):
+                FluxRandomRecolorNode().execute(self.target, self.mask, preserve_unmasked=value)
+        self.assertEqual(self.calls, [])
 
     def test_fixed_seed_repeats_candidate_and_random_seed_is_reported(self) -> None:
         first = FluxRandomRecolorNode().execute(self.target, self.mask, seed=7)
@@ -224,6 +250,20 @@ class FluxRandomRecolorTests(unittest.TestCase):
         self.assertEqual(outputs["source"].size, self.target.size)
         self.assertIsInstance(outputs["seed"], int)
         self.assertEqual(len(self.calls), 1)
+        self.assertEqual(outputs["source"].getpixel((0, 0)), self.target.getpixel((0, 0)))
+
+    def test_graph_can_disable_preserve_unmasked(self) -> None:
+        graph = NodeGraph({
+            "nodes": {"recolor": {
+                "class_type": "FluxRandomRecolorNode",
+                "inputs": {"target": {"context": "target"}, "mask": {"context": "mask"},
+                           "seed": 42, "preserve_unmasked": 0},
+            }},
+            "outputs": {"source": {"node": "recolor", "output": "source"}},
+        })
+        outputs = graph.run({"target": self.target, "mask": self.mask}, allow_side_effects=False)
+        self.assertTrue(np.all(np.asarray(outputs["source"]) == (17, 201, 99)))
+        self.assertEqual(len(self.calls), 1)
 
     def test_graph_rejects_old_mask_port_connections(self) -> None:
         with self.assertRaisesRegex(ValueError, "expected RGB_IMAGE, got MASK"):
@@ -285,6 +325,13 @@ class FluxRandomRecolorTests(unittest.TestCase):
                 self.assertEqual(image.size, self.target.size)
                 self.assertEqual(image.getpixel((10, 10)), (17, 201, 99))
                 self.assertEqual(image.getpixel((0, 0)), self.target.getpixel((0, 0)))
+
+    def test_catalog_exposes_preserve_unmasked_default_and_help(self) -> None:
+        info = node_catalog()["FluxRandomRecolorNode"]
+        self.assertEqual(info["inputs"]["preserve_unmasked"], "INT")
+        self.assertEqual(info["input_defaults"]["preserve_unmasked"], 1)
+        self.assertIn("0 关闭", info["help"]["inputs"]["preserve_unmasked"])
+        self.assertEqual(set(info["inputs"]), set(info["help"]["inputs"]))
 
     def test_public_interfaces_describe_input_and_output_types(self) -> None:
         for function in (choose_recolor, recover_recolor_mask, FluxRandomRecolorNode.execute):

@@ -95,7 +95,10 @@ PORT_NAMES = {
         "outputs": {"image": ("rgb_image", "模型生成图", "rgb_image")},
     },
     "FluxRandomRecolorNode": {
-        "inputs": {"mask": ("masked_rgb_image", "涂灰原图，不是黑白 Mask", "masked_rgb_image")},
+        "inputs": {
+            "mask": ("masked_rgb_image", "涂灰原图，不是黑白 Mask", "masked_rgb_image"),
+            "preserve_unmasked": ("preserve_unmasked", "保留 Mask 外原图：1=开启，0=关闭", "INT"),
+        },
         "outputs": {
             "source": ("rgb_image", "换色结果，未涂灰", "rgb_image"),
             "masked_source": ("masked_rgb_image", "换色结果的涂灰图", "masked_rgb_image"),

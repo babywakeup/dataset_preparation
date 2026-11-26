@@ -385,16 +385,17 @@ NODE_HELP["ColorSimilarityNode"] = {
 
 NODE_HELP["FluxRandomRecolorNode"] = {
     "title": "FLUX.2 衣服随机换色 · 生成 source",
-    "summary": "真实调用 FLUX.2 Klein，把原始 target 的指定衣服区域随机换色，生成反向训练的 source；Mask 外逐像素保留原图。",
+    "summary": "真实调用 FLUX.2 Klein，把原始 target 的指定衣服区域随机换色，生成反向训练的 source；默认合成保留 Mask 外原图，可关闭。",
     "inputs": {
         "target": "RGB_IMAGE：真实原图，生成 source 时不会修改它；须与生成涂灰图使用的原图完全一致，宽高至少 16。",
         "mask": "RGB_IMAGE：直接连接 GrayMaskNode.source 的涂灰原图，不是黑白 Mask。编辑区填 RGB(128,128,128)，其余与 target 完全一致，尺寸一致。",
         "seed": "INT：默认 -1，每次随机；0～2**32-1 固定颜色选择和推理种子。批量保持 -1 可逐张随机。",
         "num_inference_steps": "INT：base-9B 去噪步数，默认 28，必须为正整数。",
         "guidance_scale": "FLOAT：有限非负引导强度，默认 4.0。",
+        "preserve_unmasked": "INT：1（默认）开启合成，Mask 外逐像素保留 target；0 关闭，直接输出裁剪后的模型生成图。只控制后处理，不改变提示词。",
     },
     "outputs": {
-        "source": "RGB_IMAGE：原尺寸的随机换色结果，可直接接保存节点；仅白色 Mask 内使用生成像素。",
+        "source": "RGB_IMAGE：原尺寸的随机换色结果；preserve_unmasked=1 时仅 Mask 内使用生成像素，=0 时整图使用生成像素。",
         "masked_source": "RGB_IMAGE：source 的编辑区涂成 128 灰色，用作训练位置提示图。",
         "mask": "MASK：从原图与涂灰图差异恢复的同尺寸 L 二值编辑区域，只有 0/255；原色恰为 128 灰色的位置无法恢复。",
         "sampled_color": "RGB_IMAGE：128×128 随机候选色块，描述本次 source 颜色，不是恢复原 target 的训练目标色。",
@@ -407,9 +408,10 @@ NODE_HELP["FluxRandomRecolorNode"] = {
         "复用现有模型缓存、OBJECT_INPAINTING_FLUX_MODEL_DIR 与 OBJECT_INPAINTING_FLUX_DEVICE；不联网下载。"
         "原图、编辑区涂灰的原图和候选色块作为三张参考图；涂灰形式与 GrayMaskNode 一致，不是原生硬约束 inpaint。"
         "仅接受 RGB 涂灰图，旧黑白 Mask 输入及连线不再兼容。上传请用无损 PNG，不接受软边混色或其他图像编辑。"
-        "内部比较 target 与涂灰图恢复编辑区域；原图本来就是精确 128 灰色的位置无法辨认，会保守保留。"
+        "内部比较 target 与涂灰图恢复编辑区域；原图本来就是精确 128 灰色的位置无法辨认，恢复的 Mask 不包含它。"
         "宽高非 16 倍数时只补右下边缘，生成后裁回，不缩放原图。"
-        "Mask 内纹理、姿势和颜色仍需人工质检；硬边合成可能产生接缝。"
+        "默认 preserve_unmasked=1，硬边合成可能产生接缝；设为 0 后无合成，但 Mask 外也可能变化。"
+        "masked_source 始终从本次实际 source 涂灰，Mask 内纹理、姿势和颜色仍需人工质检。"
         "默认随机时，预览和保存会重新生成；想保存同一结果请把 actual_seed 填回 seed 后再保存。"
         "反向训练的目标配色应从原始 target 提取，不能误用 sampled_color。"
     ),

@@ -4,6 +4,8 @@
 
 ## 当前交接
 
+- 2026-11-25 / FluxRandomRecolorNode 增加 INT 开关 preserve_unmasked：1（默认）继续按二值 Mask 合成保留 target，0 直接输出裁回原尺寸的模型生成图；masked_source 始终从实际 source 涂灰，提示词及推理输入不变。同步合同、Studio 参数显示/帮助与随机换色说明，旧工作流默认不变。使用已选 projects（Python 3.12.8）环境，新增开关测试先失败后通过；test_flux_random_recolor_node、test_node_contracts、test_port_names 共 41 项 CPU 回归通过，编辑器检查、测试语法及 git diff --check 通过。旧测试提示词断言同步到已有实现，未改变提示词。模型使用替代输出，未运行真实 GPU 推理或浏览器验收。下一步未指定。
+
 - 双卡从 new9/checkpoint-23000 恢复后进度条长时间停在 23000：checkpoint 每 rank 的 batch_offset=3724，旧循环先解码和预处理再丢弃。改用 Accelerate 在分片 batch sampler 层跳过，并保留原 epoch 内 batch 编号。CPU 模拟双 rank 验证每 rank 剩 1095 batch，首批对应正确且只读取当前批和预取批；语法与 diff 检查通过。未执行真实双卡续训。下一步未指定。
 
 - 用户明确要单卡完整 resume。只读核对了 checkpoint 游标与 Accelerate load_state：new9/22900 为 2 rank，batch_offset 是每 rank 的已读 batch 数。跨卡数恢复需要按全局 batch 位置换算游标，保留 optimizer/scheduler 和 global_step，并明确 rank 0 的 RNG 迁移策略；当前训练入口尚未实现。未启动训练。下一步待确认迁移方案。

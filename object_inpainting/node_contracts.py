@@ -237,6 +237,7 @@ class FluxRandomRecolorInputs(TypedDict):
     seed: int
     num_inference_steps: int
     guidance_scale: float
+    preserve_unmasked: int
 
 
 class RandomRecolorOutputs(TypedDict):
